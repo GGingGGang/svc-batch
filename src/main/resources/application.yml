@@ -1,0 +1,22 @@
+server:
+  port: ${HTTP_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: svc-batch
+  lifecycle:
+    timeout-per-shutdown-phase: 15s
+
+# actuator 의 prometheus 엔드포인트를 /metrics 로 노출 (go-app 씨앗과 동일 경로)
+management:
+  endpoints:
+    web:
+      base-path: /
+      exposure:
+        include: prometheus
+      path-mapping:
+        prometheus: metrics
+  metrics:
+    tags:
+      application: svc-batch

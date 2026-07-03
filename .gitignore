@@ -1,0 +1,17 @@
+# build output
+build/
+.gradle/
+*.jar
+*.war
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# private docs
+PLAN.md
+CLAUDE.md

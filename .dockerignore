@@ -1,0 +1,8 @@
+.git
+.claude
+*.md
+build/
+.gradle/
+deploy/
+test/
+db/
