@@ -8,6 +8,31 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 15s
 
+  datasource:
+    url: jdbc:mysql://${DB_HOST}:3306/${DB_NAME:batch}?sslMode=REQUIRED&serverTimezone=UTC&characterEncoding=utf8
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    # url/user/password 미지정 — Boot 가 위 spring.datasource 빈을 그대로 재사용 (단일 커넥션/유저).
+
+  # Spring Batch 메타데이터를 batch_meta 스키마로 분리 (schema 소유권: 전체문서 §6.2).
+  # 실제 datasource 는 여전히 batch 하나 — table-prefix 로 스키마까지 포함해 정규화하면
+  # 같은 커넥션/유저(app_batch, batch/batch_meta 양쪽 GRANT 보유)로 cross-schema DDL/DML 이 통한다.
+  batch:
+    job:
+      enabled: false # Job 빈 없음 (2M/3M 에서 추가) — 기동 시 job 탐색 실패 방지
+    jdbc:
+      table-prefix: batch_meta.BATCH_
+      initialize-schema: always # 비-embedded DB 는 기본값(embedded)이 초기화를 건너뛰므로 명시 필요
+
+  data:
+    redis:
+      url: redis://${REDIS_ADDR}/${REDIS_DB:2}
+
 # actuator 의 prometheus 엔드포인트를 /metrics 로 노출 (go-app 씨앗과 동일 경로)
 management:
   endpoints:
