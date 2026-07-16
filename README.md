@@ -1,7 +1,8 @@
 # svc-batch
 
 MSA 의 비동기 백본 — 일정 이벤트 consume / 리마인더 판정 / 통계 집계.
-Java 21 / Spring Boot / Gradle. 매니페스트는 `k8s-gitops/manifests/batch/` 소유 (본 레포는 코드 + Dockerfile + Jenkinsfile).
+Java 21 / Spring Boot / Gradle. k8s 매니페스트는 [k8s-gitops](https://github.com/GGingGGang/k8s-gitops) 레포의 `manifests/batch/` 소유 (본 레포는 코드 + Dockerfile + Jenkinsfile).
+Kafka consumer / 리마인더 스캔 잡 로직은 아직 미구현 — 현재는 probe/metrics + Flyway 스키마(`V1__init.sql`) 단계.
 
 ## Ports
 
@@ -42,7 +43,7 @@ Spring Batch 자체 메타데이터 테이블은 `spring.batch.jdbc.table-prefix
 
 ```bash
 gradle -q bootJar                    # build/libs/svc-batch.jar
-java -jar build/libs/svc-batch.jar   # :8080
+java -jar build/libs/svc-batch.jar   # :8080 — 기동에 위 DB_* / REDIS_ADDR env 필요 (Flyway 가 시작 시 실행)
 ```
 
 CI: Jenkins(`services` org folder) → Kaniko → GHCR → deployBump → ArgoCD.
