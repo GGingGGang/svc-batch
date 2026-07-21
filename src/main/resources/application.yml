@@ -19,15 +19,18 @@ spring:
     baseline-on-migrate: false
     # url/user/password 미지정 — Boot 가 위 spring.datasource 빈을 그대로 재사용 (단일 커넥션/유저).
 
-  # Spring Batch 메타데이터를 batch_meta 스키마로 분리 (schema 소유권: 전체문서 §6.2).
-  # 실제 datasource 는 여전히 batch 하나 — table-prefix 로 스키마까지 포함해 정규화하면
-  # 같은 커넥션/유저(app_batch, batch/batch_meta 양쪽 GRANT 보유)로 cross-schema DDL/DML 이 통한다.
+  # Spring Batch 메타데이터를 batch_meta 스키마로 분리. 실제 datasource 는 여전히 batch 하나 —
+  # table-prefix 로 스키마까지 포함해 정규화하면 같은 커넥션/유저(app_batch, batch/batch_meta 양쪽
+  # GRANT 보유)로 cross-schema DML 이 통한다 (런타임 쿼리에서는 실제로 동작 확인).
   batch:
     job:
       enabled: false # Job 빈 없음 (2M/3M 에서 추가) — 기동 시 job 탐색 실패 방지
     jdbc:
       table-prefix: batch_meta.BATCH_
-      initialize-schema: always # 비-embedded DB 는 기본값(embedded)이 초기화를 건너뛰므로 명시 필요
+      # Boot 자동 초기화는 DDL 단계에서 prefix 의 스키마 한정자를 반영하지 못하고 BATCH_* 테이블을
+      # batch_meta 가 아니라 커넥션 기본 스키마(batch)에 만들어버려 꺼둔다(통합 테스트로 재현/확인).
+      # 메타 테이블은 Flyway V2__batch_meta_schema.sql 이 batch_meta 스키마에 직접 생성한다.
+      initialize-schema: never
 
   data:
     redis:
