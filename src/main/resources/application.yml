@@ -36,6 +36,22 @@ spring:
     redis:
       url: redis://${REDIS_ADDR}/${REDIS_DB:2}
 
+  kafka:
+    # 로컬 기본값은 개발 편의용 — 운영은 항상 KAFKA_BOOTSTRAP env 로 덮어씀.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_GROUP:batch-reminders}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    listener:
+      # DB 커밋 후 수동 offset commit — 리스너가 Acknowledgment.acknowledge() 호출.
+      ack-mode: manual_immediate
+
 # actuator 의 prometheus 엔드포인트를 /metrics 로 노출 (go-app 씨앗과 동일 경로)
 management:
   endpoints:
