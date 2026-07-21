@@ -4,7 +4,16 @@
 
 MSA 의 비동기 백본 — 일정 이벤트 consume / 리마인더 판정 / 통계 집계.
 Java 21 / Spring Boot / Gradle. k8s 매니페스트는 [k8s-gitops](https://github.com/GGingGGang/k8s-gitops) 레포의 `manifests/batch/` 소유 (본 레포는 코드 + Dockerfile + Jenkinsfile).
-Kafka consumer / 리마인더 스캔 잡 로직은 아직 미구현 — 현재는 probe/metrics + Flyway 스키마 + Spring Batch 메타 배선 단계 (testcontainers 통합 테스트로 검증).
+Kafka consumer(reconcile + stats 증분)까지 구현 완료 — testcontainers Kafka/MySQL 로 중복/역순/삭제 시나리오 검증. 리마인더 스캔 잡(ShedLock)은 아직 미구현.
+
+## Kafka Consumer
+
+- consumer group: `batch-reminders` (`KAFKA_GROUP`), manual ack — DB 트랜잭션 커밋 후에만 offset commit.
+- topic: `schedules.created.v1` / `schedules.updated.v1` (단일 upsert 핸들러) / `schedules.deleted.v1`.
+- reconcile 알고리즘(중복/역순 방어, tombstone terminal, stats 증분)은 `PLAN.md` §4 참조.
+- 실패 처리: 역직렬화 실패는 즉시, 그 외 처리 실패는 3회 재시도 후 `<topic>.dlq` 로 원본 그대로 전달
+  (header `x-original-topic` / `x-failure-reason` / `x-failure-ts`) 하고 ack.
+- 실토픽 연결(운영 KafkaTopic CRD)과 실제 알림 발송은 4M 이후 스코프 — 현재는 testcontainers 로만 검증.
 
 ## Ports
 
@@ -34,6 +43,9 @@ DB_NAME=batch         # default batch
 
 REDIS_ADDR=           # required, host:port
 REDIS_DB=2            # default 2 (ShedLock)
+
+KAFKA_BOOTSTRAP=      # default localhost:9092 (local dev) — 운영은 항상 명시 주입
+KAFKA_GROUP=batch-reminders  # default batch-reminders
 ```
 
 ## Database
