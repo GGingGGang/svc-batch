@@ -42,6 +42,10 @@ spring:
 app:
   nats:
     url: ${NATS_URL:nats://localhost:4222}
+  # 리마인더 스캔 잡(ReminderScanJob) 주기. ShedLock(batch:lock:reminder-scan, Redis DB2)이 replica
+  # 간 중복 실행을 막는다.
+  reminder-scan:
+    interval-ms: ${REMINDER_SCAN_INTERVAL_MS:60000}
 
 # actuator 의 prometheus 엔드포인트를 /metrics 로 노출 (go-app 씨앗과 동일 경로)
 management:

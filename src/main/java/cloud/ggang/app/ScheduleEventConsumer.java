@@ -1,6 +1,7 @@
 package cloud.ggang.app;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.nats.client.Message;
 import io.nats.client.MessageHandler;
 import java.util.function.Consumer;
@@ -20,19 +21,23 @@ public class ScheduleEventConsumer implements MessageHandler {
     private final ObjectMapper objectMapper;
     private final ScheduleReconcileService reconcileService;
     private final DlqPublisher dlqPublisher;
+    private final MeterRegistry meterRegistry;
 
     public ScheduleEventConsumer(
             ObjectMapper objectMapper,
             ScheduleReconcileService reconcileService,
-            DlqPublisher dlqPublisher) {
+            DlqPublisher dlqPublisher,
+            MeterRegistry meterRegistry) {
         this.objectMapper = objectMapper;
         this.reconcileService = reconcileService;
         this.dlqPublisher = dlqPublisher;
+        this.meterRegistry = meterRegistry;
     }
 
     @Override
     public void onMessage(Message msg) {
         String subject = msg.getSubject();
+        meterRegistry.counter("schedule_events_consumed_total", "subject", subject).increment();
         if (NatsSubjects.SCHEDULE_CREATED.equals(subject) || NatsSubjects.SCHEDULE_UPDATED.equals(subject)) {
             process(msg, ScheduleEventPayload.class, reconcileService::upsert);
         } else if (NatsSubjects.SCHEDULE_DELETED.equals(subject)) {
@@ -50,6 +55,7 @@ public class ScheduleEventConsumer implements MessageHandler {
         } catch (Exception ex) {
             log.warn("deserialize failed subject={}", msg.getSubject(), ex);
             dlqPublisher.publish(msg, "deserialize: " + ex.getMessage());
+            meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
             msg.ack();
             return;
         }
@@ -67,6 +73,7 @@ public class ScheduleEventConsumer implements MessageHandler {
         }
         dlqPublisher.publish(
                 msg, "processing failed after " + MAX_ATTEMPTS + " attempts: " + lastFailure);
+        meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
         msg.ack();
     }
 }
