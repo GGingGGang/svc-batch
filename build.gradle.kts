@@ -19,6 +19,11 @@ repositories {
     mavenCentral()
 }
 
+// Spring Boot 3.4.2 관리 버전(10.1.34)에 CVE 대응 등으로 패치 필요 시 override — Tomcat 11.0.x(Jakarta
+// EE 11/Servlet 6.1)는 Spring Boot 4 부터 지원이라 여기선 10.1.x 라인 안에서만 올린다. tomcat.version
+// 프로퍼티 하나로 tomcat-embed-core/-el/-websocket 이 함께 맞춰짐(Spring Boot BOM 표준 override 방식).
+extra["tomcat.version"] = "10.1.55"
+
 // Spring Boot 3.4.x 의 dependency-management 가 shedlock 을 관리하지 않으므로 명시 고정.
 // shedlock 7.x 부터는 Spring Framework 7(Boot 4) 대상이라 6.x 최신판 사용 (Spring 6.2.x 호환).
 val shedlockVersion = "6.10.0"
