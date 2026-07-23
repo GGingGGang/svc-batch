@@ -18,7 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-// NATS 연결(CONNECTED/RECONNECTED) 시점에 NatsConfig 가 호출 — APP_SCHEDULES_DLQ stream(batch 소유,
+// NATS 연결(CONNECTED/RECONNECTED) 시점에 NatsConnectionHolder 가 호출 — APP_SCHEDULES_DLQ stream(batch 소유,
 // 전체문서 PLAN.md §7.2)을 idempotent create-or-update 하고 APP_SCHEDULES 위에 durable pull consumer
 // batch-reminders 를 붙여 소비를 시작한다. 실패 시(예: core 가 아직 APP_SCHEDULES 를 안 만듦) 다음
 // 연결 이벤트에서 재시도하도록 시작 플래그를 되돌린다.

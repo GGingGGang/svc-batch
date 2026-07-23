@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -62,6 +63,11 @@ class ScheduleEventConsumerIntegrationTest {
                     .withCommand("-js")
                     .waitingFor(Wait.forLogMessage(".*Server is ready.*\\n", 1));
 
+    // 테스트 전용 producer/inspector 커넥션 — 앱 내부의 NatsConnectionHolder(비동기 접속) 배선과는
+    // 무관하게 독립적으로 발행/조회한다(구 Kafka 테스트의 별도 KafkaProducer/KafkaConsumer 와 동형).
+    private static Connection testConnection;
+    private static JetStream testJetStream;
+
     @DynamicPropertySource
     static void registerProperties(DynamicPropertyRegistry registry) throws Exception {
         registry.add(
@@ -74,29 +80,35 @@ class ScheduleEventConsumerIntegrationTest {
         String natsUrl = "nats://" + NATS.getHost() + ":" + NATS.getMappedPort(4222);
         registry.add("app.nats.url", () -> natsUrl);
 
+        testConnection = Nats.connect(natsUrl);
+        testJetStream = testConnection.jetStream();
+        JetStreamManagement jsm = testConnection.jetStreamManagement();
+
         // APP_SCHEDULES 는 실 운영에서 core 소유(전체문서 PLAN.md §7.2) — batch 단독 테스트라
         // core 역할을 대신해 컨텍스트 기동 전에 미리 선언해둔다.
-        try (Connection bootstrap = Nats.connect(natsUrl)) {
-            JetStreamManagement jsm = bootstrap.jetStreamManagement();
-            jsm.addStream(
-                    StreamConfiguration.builder()
-                            .name(NatsSubjects.STREAM_SCHEDULES)
-                            .subjects(
-                                    NatsSubjects.SCHEDULE_CREATED,
-                                    NatsSubjects.SCHEDULE_UPDATED,
-                                    NatsSubjects.SCHEDULE_DELETED)
-                            .storageType(StorageType.File)
-                            .maxAge(Duration.ofDays(7))
-                            .maxBytes(1024L * 1024 * 1024)
-                            .discardPolicy(DiscardPolicy.Old)
-                            .build());
+        jsm.addStream(
+                StreamConfiguration.builder()
+                        .name(NatsSubjects.STREAM_SCHEDULES)
+                        .subjects(
+                                NatsSubjects.SCHEDULE_CREATED,
+                                NatsSubjects.SCHEDULE_UPDATED,
+                                NatsSubjects.SCHEDULE_DELETED)
+                        .storageType(StorageType.File)
+                        .maxAge(Duration.ofDays(7))
+                        .maxBytes(1024L * 1024 * 1024)
+                        .discardPolicy(DiscardPolicy.Old)
+                        .build());
+    }
+
+    @AfterAll
+    static void closeTestConnection() throws Exception {
+        if (testConnection != null) {
+            testConnection.close();
         }
     }
 
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
-    @Autowired private JetStream jetStream;
-    @Autowired private Connection natsConnection;
 
     @Test
     void duplicateCreatedEventIsIdempotent() throws Exception {
@@ -252,7 +264,7 @@ class ScheduleEventConsumerIntegrationTest {
                 .untilAsserted(
                         () -> {
                             StreamContext dlqStream =
-                                    natsConnection.getStreamContext(NatsSubjects.STREAM_SCHEDULES_DLQ);
+                                    testConnection.getStreamContext(NatsSubjects.STREAM_SCHEDULES_DLQ);
                             ConsumerContext consumerContext =
                                     dlqStream.createOrUpdateConsumer(
                                             ConsumerConfiguration.builder()
@@ -274,7 +286,7 @@ class ScheduleEventConsumerIntegrationTest {
     }
 
     private void send(String subject, String json) throws Exception {
-        jetStream.publish(subject, json.getBytes(StandardCharsets.UTF_8));
+        testJetStream.publish(subject, json.getBytes(StandardCharsets.UTF_8));
     }
 
     private String upsertJson(

@@ -37,7 +37,7 @@ spring:
       url: redis://${REDIS_ADDR}/${REDIS_DB:2}
 
 # 로컬 기본값은 개발 편의용 — 운영은 항상 NATS_URL env 로 덮어씀.
-# 서버 미기동 상태로도 컨텍스트가 뜨도록 NatsConfig 가 retryOnFailedConnect 로 연결한다
+# 서버 미기동 상태로도 컨텍스트가 뜨도록 NatsConnectionHolder 가 Nats.connectAsynchronously 로 연결한다
 # (연결 성공 시점에 stream/durable consumer 를 기동 — svc-batch/PLAN.md §4 참고).
 app:
   nats:
