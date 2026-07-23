@@ -29,7 +29,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-batch")
     implementation("org.springframework.boot:spring-boot-starter-data-jdbc")
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
-    implementation("org.springframework.kafka:spring-kafka")
+    implementation("io.nats:jnats:2.26.0")
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-mysql")
     implementation("net.javacrumbs.shedlock:shedlock-spring:$shedlockVersion")
@@ -39,12 +39,11 @@ dependencies {
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.batch:spring-batch-test")
-    testImplementation("org.springframework.kafka:spring-kafka-test")
     // testcontainers 버전은 spring-boot-dependencies 가 관리 (testcontainers-bom import) — 별도 버전 고정 불필요.
+    // NATS 는 org.testcontainers 공식 모듈이 없어 GenericContainer + 공식 nats 이미지로 직접 기동(운영과 동일 2.14.2-alpine).
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:testcontainers")
     testImplementation("org.testcontainers:mysql")
-    testImplementation("org.testcontainers:kafka")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

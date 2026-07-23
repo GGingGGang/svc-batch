@@ -4,40 +4,43 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.nats.client.Connection;
+import io.nats.client.ConsumerContext;
+import io.nats.client.JetStream;
+import io.nats.client.JetStreamManagement;
+import io.nats.client.Message;
+import io.nats.client.Nats;
+import io.nats.client.StreamContext;
+import io.nats.client.api.AckPolicy;
+import io.nats.client.api.ConsumerConfiguration;
+import io.nats.client.api.DiscardPolicy;
+import io.nats.client.api.StorageType;
+import io.nats.client.api.StreamConfiguration;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 import java.util.UUID;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.serialization.StringDeserializer;
-import org.apache.kafka.common.serialization.StringSerializer;
-import org.apache.kafka.common.header.Header;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.KafkaContainer;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
-// Kafka consumer reconcile 검증 — 실토픽 불요 (testcontainers Kafka, 운영에서는 auto-create 금지지만
-// 여기서는 테스트 설정으로 허용). svc-batch/PLAN.md §4 / §7 DoD: 중복/역순/삭제-후-갱신 시나리오.
+// NATS consumer reconcile 검증 — 실스트림 불요(testcontainers 공식 nats 이미지, org.testcontainers 전용
+// 모듈 부재라 GenericContainer 로 직접 기동). svc-batch/PLAN.md §4 / 전체문서 §7 DoD: 중복/역순/삭제-후-갱신.
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class ScheduleEventConsumerIntegrationTest {
@@ -53,39 +56,47 @@ class ScheduleEventConsumerIntegrationTest {
                             "/docker-entrypoint-initdb.d/01-batch-meta.sql");
 
     @Container
-    static final KafkaContainer KAFKA =
-            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.7.1"))
-                    .withEnv("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "true");
+    static final GenericContainer<?> NATS =
+            new GenericContainer<>(DockerImageName.parse("nats:2.14.2-alpine"))
+                    .withExposedPorts(4222)
+                    .withCommand("-js")
+                    .waitingFor(Wait.forLogMessage(".*Server is ready.*\\n", 1));
 
     @DynamicPropertySource
-    static void registerProperties(DynamicPropertyRegistry registry) {
+    static void registerProperties(DynamicPropertyRegistry registry) throws Exception {
         registry.add(
                 "spring.datasource.url",
                 () -> MYSQL.getJdbcUrl() + "?sslMode=REQUIRED&serverTimezone=UTC&characterEncoding=utf8");
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("spring.data.redis.url", () -> "redis://localhost:6379/2");
-        registry.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
+
+        String natsUrl = "nats://" + NATS.getHost() + ":" + NATS.getMappedPort(4222);
+        registry.add("app.nats.url", () -> natsUrl);
+
+        // APP_SCHEDULES 는 실 운영에서 core 소유(전체문서 PLAN.md §7.2) — batch 단독 테스트라
+        // core 역할을 대신해 컨텍스트 기동 전에 미리 선언해둔다.
+        try (Connection bootstrap = Nats.connect(natsUrl)) {
+            JetStreamManagement jsm = bootstrap.jetStreamManagement();
+            jsm.addStream(
+                    StreamConfiguration.builder()
+                            .name(NatsSubjects.STREAM_SCHEDULES)
+                            .subjects(
+                                    NatsSubjects.SCHEDULE_CREATED,
+                                    NatsSubjects.SCHEDULE_UPDATED,
+                                    NatsSubjects.SCHEDULE_DELETED)
+                            .storageType(StorageType.File)
+                            .maxAge(Duration.ofDays(7))
+                            .maxBytes(1024L * 1024 * 1024)
+                            .discardPolicy(DiscardPolicy.Old)
+                            .build());
+        }
     }
 
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
-
-    private KafkaProducer<String, String> producer;
-
-    @BeforeEach
-    void setUpProducer() {
-        Properties props = new Properties();
-        props.put("bootstrap.servers", KAFKA.getBootstrapServers());
-        props.put("key.serializer", StringSerializer.class.getName());
-        props.put("value.serializer", StringSerializer.class.getName());
-        producer = new KafkaProducer<>(props);
-    }
-
-    @AfterEach
-    void tearDownProducer() {
-        producer.close();
-    }
+    @Autowired private JetStream jetStream;
+    @Autowired private Connection natsConnection;
 
     @Test
     void duplicateCreatedEventIsIdempotent() throws Exception {
@@ -103,8 +114,8 @@ class ScheduleEventConsumerIntegrationTest {
                         List.of(Map.of("minutes_before", 30, "channel", "push")),
                         occurredAt);
 
-        send(KafkaTopics.SCHEDULE_CREATED, scheduleId.toString(), json);
-        send(KafkaTopics.SCHEDULE_CREATED, scheduleId.toString(), json);
+        send(NatsSubjects.SCHEDULE_CREATED, json);
+        send(NatsSubjects.SCHEDULE_CREATED, json);
 
         awaitReminderCount(scheduleId, 1);
 
@@ -148,9 +159,9 @@ class ScheduleEventConsumerIntegrationTest {
                         occurredOld);
 
         // updated(최신) 먼저, created(과거) 나중 도착 — 역순.
-        send(KafkaTopics.SCHEDULE_UPDATED, scheduleId.toString(), updatedJson);
+        send(NatsSubjects.SCHEDULE_UPDATED, updatedJson);
         awaitReminderCount(scheduleId, 1);
-        send(KafkaTopics.SCHEDULE_CREATED, scheduleId.toString(), createdJson);
+        send(NatsSubjects.SCHEDULE_CREATED, createdJson);
 
         // 과거 이벤트가 나중에 와도 무해해야 하므로, 처리 유예 시간 후에도 최신 상태 유지를 확인.
         Thread.sleep(2000);
@@ -183,11 +194,11 @@ class ScheduleEventConsumerIntegrationTest {
                         "manual",
                         List.of(Map.of("minutes_before", 30, "channel", "push")),
                         occurredCreated);
-        send(KafkaTopics.SCHEDULE_CREATED, scheduleId.toString(), createdJson);
+        send(NatsSubjects.SCHEDULE_CREATED, createdJson);
         awaitReminderCount(scheduleId, 1);
 
         String deleteJsonBody = deletedJson(scheduleId, userId, occurredDeleted);
-        send(KafkaTopics.SCHEDULE_DELETED, scheduleId.toString(), deleteJsonBody);
+        send(NatsSubjects.SCHEDULE_DELETED, deleteJsonBody);
 
         await()
                 .atMost(Duration.ofSeconds(20))
@@ -203,7 +214,7 @@ class ScheduleEventConsumerIntegrationTest {
                         "manual",
                         List.of(Map.of("minutes_before", 15, "channel", "push")),
                         occurredLateUpdate);
-        send(KafkaTopics.SCHEDULE_UPDATED, scheduleId.toString(), lateUpdateJson);
+        send(NatsSubjects.SCHEDULE_UPDATED, lateUpdateJson);
 
         Thread.sleep(3000);
         assertThat(reminderCount(scheduleId)).isEqualTo(1);
@@ -220,45 +231,50 @@ class ScheduleEventConsumerIntegrationTest {
     @Test
     void malformedPayloadGoesToDlqWithHeaders() throws Exception {
         String badJson = "{not-valid-json";
-        send(KafkaTopics.SCHEDULE_CREATED, "bad-key", badJson);
+        send(NatsSubjects.SCHEDULE_CREATED, badJson);
 
-        ConsumerRecord<String, String> dlqRecord =
-                awaitDlqRecord(KafkaTopics.dlqTopic(KafkaTopics.SCHEDULE_CREATED));
+        Message dlqMessage = awaitDlqMessage(NatsSubjects.dlqSubject(NatsSubjects.SCHEDULE_CREATED));
 
-        assertThat(dlqRecord.value()).isEqualTo(badJson);
-        assertThat(headerValue(dlqRecord, "x-original-topic")).isEqualTo(KafkaTopics.SCHEDULE_CREATED);
-        assertThat(headerValue(dlqRecord, "x-failure-reason")).isNotBlank();
-        assertThat(headerValue(dlqRecord, "x-failure-ts")).isNotBlank();
+        assertThat(new String(dlqMessage.getData(), StandardCharsets.UTF_8)).isEqualTo(badJson);
+        assertThat(headerValue(dlqMessage, "x-original-subject")).isEqualTo(NatsSubjects.SCHEDULE_CREATED);
+        assertThat(headerValue(dlqMessage, "x-failure-reason")).isNotBlank();
+        assertThat(headerValue(dlqMessage, "x-failure-ts")).isNotBlank();
     }
 
-    private ConsumerRecord<String, String> awaitDlqRecord(String dlqTopic) {
-        Properties props = new Properties();
-        props.put("bootstrap.servers", KAFKA.getBootstrapServers());
-        props.put("group.id", "dlq-test-" + UUID.randomUUID());
-        props.put("auto.offset.reset", "earliest");
-        props.put("key.deserializer", StringDeserializer.class.getName());
-        props.put("value.deserializer", StringDeserializer.class.getName());
-        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            consumer.subscribe(Collections.singletonList(dlqTopic));
-            long deadline = System.currentTimeMillis() + Duration.ofSeconds(20).toMillis();
-            while (System.currentTimeMillis() < deadline) {
-                ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(500));
-                for (ConsumerRecord<String, String> record : records) {
-                    return record;
-                }
-            }
-        }
-        throw new AssertionError("no record arrived on " + dlqTopic + " within timeout");
+    // durable consumer(batch-reminders) 기동이 CONNECTED 이벤트 콜백에서 비동기로 이뤄지고,
+    // APP_SCHEDULES_DLQ stream 도 그 기동 절차의 일부라 아직 안 만들어졌을 수 있어 전체를 재시도로 감싼다.
+    private Message awaitDlqMessage(String dlqSubject) {
+        AtomicReference<Message> found = new AtomicReference<>();
+        await()
+                .atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofMillis(500))
+                .ignoreExceptions()
+                .untilAsserted(
+                        () -> {
+                            StreamContext dlqStream =
+                                    natsConnection.getStreamContext(NatsSubjects.STREAM_SCHEDULES_DLQ);
+                            ConsumerContext consumerContext =
+                                    dlqStream.createOrUpdateConsumer(
+                                            ConsumerConfiguration.builder()
+                                                    .filterSubject(dlqSubject)
+                                                    .ackPolicy(AckPolicy.Explicit)
+                                                    .build());
+                            Message msg = consumerContext.next(Duration.ofSeconds(2));
+                            assertThat(msg).as("dlq message on " + dlqSubject).isNotNull();
+                            found.set(msg);
+                        });
+        found.get().ack();
+        return found.get();
     }
 
-    private String headerValue(ConsumerRecord<String, String> record, String headerName) {
-        Header header = record.headers().lastHeader(headerName);
-        assertThat(header).as("header " + headerName).isNotNull();
-        return new String(header.value(), java.nio.charset.StandardCharsets.UTF_8);
+    private String headerValue(Message message, String headerName) {
+        String value = message.getHeaders().getFirst(headerName);
+        assertThat(value).as("header " + headerName).isNotNull();
+        return value;
     }
 
-    private void send(String topic, String key, String json) throws Exception {
-        producer.send(new ProducerRecord<>(topic, key, json)).get();
+    private void send(String subject, String json) throws Exception {
+        jetStream.publish(subject, json.getBytes(StandardCharsets.UTF_8));
     }
 
     private String upsertJson(
