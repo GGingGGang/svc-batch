@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -44,6 +45,7 @@ import org.testcontainers.utility.MountableFile;
 // 모듈 부재라 GenericContainer 로 직접 기동). svc-batch/PLAN.md §4 / 전체문서 §7 DoD: 중복/역순/삭제-후-갱신.
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@Tag("integration")
 class ScheduleEventConsumerIntegrationTest {
 
     @Container

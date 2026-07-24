@@ -7,6 +7,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import javax.sql.DataSource;
 
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -24,6 +25,7 @@ import org.testcontainers.utility.MountableFile;
 // MySQL 이미지가 root 권한으로 실행해주는 docker-entrypoint-initdb.d 컨벤션을 사용한다.
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@Tag("integration")
 class BatchMetaSchemaIntegrationTest {
 
     @Container

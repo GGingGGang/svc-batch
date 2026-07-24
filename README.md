@@ -82,4 +82,17 @@ gradle -q bootJar                    # build/libs/svc-batch.jar
 java -jar build/libs/svc-batch.jar   # :8080 — 기동에 위 DB_* / REDIS_ADDR env 필요 (Flyway 가 시작 시 실행)
 ```
 
-CI: Jenkins(`services` org folder) → Kaniko → GHCR → deployBump → ArgoCD.
+## Test
+
+`../test-contract.md` §3 의 java 계약 — 유닛(Docker 없음, Jenkins 게이트)과 통합(testcontainers, 이 레포의 GHA)을 클래스 단위 `@Tag("integration")` 로 분리:
+
+```bash
+gradle test             # 유닛만(태그 없음) — Jenkins 가 gradle --no-daemon test 로 실행
+gradle integrationTest  # 통합만(@Tag("integration")) — Docker 필요, testcontainers MySQL/Redis/NATS 자동 기동
+```
+
+기존 3개 테스트 클래스(`BatchMetaSchemaIntegrationTest`, `ReminderScanJobIntegrationTest`, `ScheduleEventConsumerIntegrationTest`)는 전부 `@Tag("integration")` — 순수 유닛 테스트는 아직 0개(`gradle test` 는 항상 "0 tests, BUILD SUCCESSFUL"). 이는 게이트 위반이 아니라 레포 품질 부채로 수용된 상태이며 후속 앱 기능 턴에서 상환 예정 — 배경은 `test-contract.md` §6 참고, 여기서 재논의하지 않는다.
+
+`.github/workflows/test.yml` 이 push(main)/PR 마다 `gradle test` + `gradle integrationTest` 풀 스위트를 실행한다.
+
+CI: Jenkins(`services` org folder, 유닛 게이트) → Kaniko → GHCR → deployBump → ArgoCD. 통합은 이 레포 GHA(병렬, 게이트 아님 — 상세는 `test-contract.md` §4).

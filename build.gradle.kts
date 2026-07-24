@@ -81,6 +81,22 @@ tasks.jar {
     enabled = false
 }
 
-tasks.withType<Test> {
-    useJUnitPlatform()
+// 유닛 게이트(Jenkins, Docker 없음) — testcontainers 통합 클래스(@Tag("integration"))는 제외.
+// 태그 미부여 유닛 테스트가 아직 0개라 이 태스크는 현재 항상 "0 tests, BUILD SUCCESSFUL" — 부채는
+// test-contract.md §6 참고, 게이트 완화가 아니라 테스트 작성으로 상환한다.
+tasks.test {
+    useJUnitPlatform {
+        excludeTags("integration")
+    }
+}
+
+// 통합 테스트(레포 GHA, Docker 가용) — testcontainers 로 MySQL/Redis/NATS 기동.
+val integrationTest by tasks.registering(Test::class) {
+    group = "verification"
+    description = "Runs tests tagged \"integration\" (testcontainers) — requires Docker."
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    useJUnitPlatform {
+        includeTags("integration")
+    }
 }
