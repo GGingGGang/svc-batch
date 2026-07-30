@@ -4,7 +4,7 @@
 
 MSA 의 비동기 백본 — 일정 이벤트 consume / 리마인더 판정 / 통계 집계.
 Java 21 / Spring Boot / Gradle. k8s 매니페스트는 [k8s-gitops](https://github.com/GGingGGang/k8s-gitops) 레포의 `manifests/batch/` 소유 (본 레포는 코드 + Dockerfile + Jenkinsfile).
-NATS consumer(reconcile + stats 증분) + 리마인더 스캔 잡(ShedLock, dry run) + OTel 최소까지 구현 완료 — testcontainers(공식 nats 이미지 / MySQL / Redis)로 중복·역순·삭제·스캔 락 시나리오 검증.
+NATS consumer(reconcile + stats 증분) + 리마인더 스캔 잡(ShedLock, dry run) + tombstone purge 잡(ShedLock) + OTel 최소까지 구현 완료 — testcontainers(공식 nats 이미지 / MySQL / Redis)로 중복·역순·삭제·스캔 락·purge 락 시나리오 검증.
 
 ## NATS Consumer
 
@@ -16,7 +16,7 @@ NATS consumer(reconcile + stats 증분) + 리마인더 스캔 잡(ShedLock, dry 
 - reconcile 알고리즘(중복/역순 방어, tombstone terminal, stats 증분)은 `PLAN.md` §4 참조.
 - 실패 처리: 역직렬화 실패는 즉시, 그 외 처리 실패는 3회 재시도 후 `app.schedules.dlq.<event>`(stream `APP_SCHEDULES_DLQ`, batch 소유)로 원본 그대로 전달
   (header `x-original-subject` / `x-failure-reason` / `x-failure-ts`) 하고 ack. 헤더 값은 개행/제어문자를 제거해 전달(`DlqPublisher`) — 실패 사유 메시지에 개행이 섞이면 NATS 헤더 인코딩이 즉시 거부하는 문제를 방어.
-- 실스트림 연결(core 의 `APP_SCHEDULES` 발행 착수)과 실제 알림 발송은 4M 이후 스코프 — 현재는 testcontainers 로만 검증.
+- 실제 알림 발송은 확장 스코프(svc-notify) — 현재는 상태 전이("발송")까지만. 실스트림 연결(core 가 실제로 발행한 이벤트를 이 서비스가 실클러스터에서 소비하는지)은 코드/consumer 로직상 testcontainers 검증과 동일 경로라 추가 코드는 없음 — 남은 건 실클러스터 사실 확인 하나(`PLAN.md` §0 4M 평가 참고).
 
 ## 리마인더 스캔 잡
 
@@ -25,11 +25,17 @@ NATS consumer(reconcile + stats 증분) + 리마인더 스캔 잡(ShedLock, dry 
 - grace window 이내 → `sent`(+`sent_at`), 초과 → `skipped` 로 배치 전이. `daily_schedule_stats.reminders_sent`/`reminders_skipped` 증분.
 - **3M 은 dry run** — 상태 전이가 "발송"의 전부이며 실제 알림 채널 dispatch 는 호출하지 않는다(확장 스코프 svc-notify, `PLAN.md` §5).
 
+## Tombstone Purge
+
+- `TombstonePurgeJob` — `@Scheduled`(기본 7일 주기, `TOMBSTONE_PURGE_INTERVAL_MS`) + ShedLock(`@SchedulerLock("batch:lock:tombstone-purge")`, Redis DB2, `SchedulingConfig`)로 replica 간 중복 실행을 막는다 — 리마인더 스캔 잡과 동일한 락 메커니즘.
+- `DELETE FROM schedule_event_state WHERE is_deleted=1 AND updated_at < UTC_TIMESTAMP() - INTERVAL 14 DAY` 단일 문(PLAN.md §6). retention 14일은 core 가 선언하는 NATS stream 의 `max_age`(7일, 전체문서 §7.2)보다 길게 잡아, 그 사이 재전달된 오래된 이벤트도 여전히 `is_deleted=1` tombstone 행을 만나 §4.2 의 terminal 가드로 무시되도록 보장한다.
+- `is_deleted=0` 행은 나이와 무관하게 절대 삭제되지 않는다 — 삭제 대상은 tombstone(이미 삭제 처리된 일정의 상태 행)뿐이며, 살아있는 일정의 이력 행이 아니다.
+
 ## Observability
 
 - `/metrics` 는 앱 단일 포트(actuator `management.endpoints.web.path-mapping.prometheus=metrics`) — 별도 포트 없음.
 - RED: `/healthz`·`/readyz` 는 actuator 자동계측(`http_server_requests_seconds_*`)으로 커버.
-- 도메인 카운터: `reminders_scanned_total` / `reminders_sent_total` / `reminders_skipped_total`, `reminder_scan_duration_seconds`(Timer), `reminder_scan_runs_total{result}`, `schedule_events_consumed_total{subject}` / `schedule_events_dlq_total{subject}`.
+- 도메인 카운터: `reminders_scanned_total` / `reminders_sent_total` / `reminders_skipped_total`, `reminder_scan_duration_seconds`(Timer), `reminder_scan_runs_total{result}`, `schedule_events_consumed_total{subject}` / `schedule_events_dlq_total{subject}`, `tombstone_purge_runs_total` / `tombstone_purged_total`.
 
 ## Ports
 
@@ -63,6 +69,7 @@ REDIS_DB=2            # default 2 (ShedLock)
 NATS_URL=             # default nats://localhost:4222 (local dev) — 운영은 항상 명시 주입
 
 REMINDER_SCAN_INTERVAL_MS=   # default 60000 — 리마인더 스캔 잡 주기(ms)
+TOMBSTONE_PURGE_INTERVAL_MS= # default 604800000(7d) — tombstone purge 잡 주기(ms)
 ```
 
 ## Database
@@ -91,7 +98,9 @@ gradle test             # 유닛만(태그 없음) — Jenkins 가 gradle --no-d
 gradle integrationTest  # 통합만(@Tag("integration")) — Docker 필요, testcontainers MySQL/Redis/NATS 자동 기동
 ```
 
-기존 3개 테스트 클래스(`BatchMetaSchemaIntegrationTest`, `ReminderScanJobIntegrationTest`, `ScheduleEventConsumerIntegrationTest`)는 전부 `@Tag("integration")` — 순수 유닛 테스트는 아직 0개(`gradle test` 는 항상 "0 tests, BUILD SUCCESSFUL"). 이는 게이트 위반이 아니라 레포 품질 부채로 수용된 상태이며 후속 앱 기능 턴에서 상환 예정 — 배경은 `test-contract.md` §6 참고, 여기서 재논의하지 않는다.
+4개 테스트 클래스(`BatchMetaSchemaIntegrationTest`, `ReminderScanJobIntegrationTest`, `ScheduleEventConsumerIntegrationTest`, `TombstonePurgeJobIntegrationTest`)는 전부 `@Tag("integration")` — 순수 유닛 테스트는 아직 0개(`gradle test` 는 항상 "0 tests, BUILD SUCCESSFUL"). 이는 게이트 위반이 아니라 레포 품질 부채로 수용된 상태이며 후속 앱 기능 턴에서 상환 예정 — 배경은 `test-contract.md` §6 참고, 여기서 재논의하지 않는다.
+
+`TombstonePurgeJobIntegrationTest`는 retention(14일) 경계(오래된 tombstone 삭제·최근 tombstone 보존)와 `is_deleted=0` 행이 나이와 무관하게 보호되는지, ShedLock 이 다른 replica 점유 시 실행을 막는지를 `ReminderScanJobIntegrationTest`와 동일한 패턴(수동 락 선점)으로 검증한다.
 
 `.github/workflows/test.yml` 이 push(main)/PR 마다 `gradle test` + `gradle integrationTest` 풀 스위트를 실행한다.
 
