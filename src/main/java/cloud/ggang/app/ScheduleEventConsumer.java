@@ -53,8 +53,8 @@ public class ScheduleEventConsumer implements MessageHandler {
         try {
             payload = objectMapper.readValue(msg.getData(), payloadType);
         } catch (Exception ex) {
-            log.warn("deserialize failed subject={}", msg.getSubject(), ex);
-            dlqPublisher.publish(msg, "deserialize: " + ex.getMessage());
+            log.warn("deserialize failed subject={} error={}", msg.getSubject(), ex.getClass().getSimpleName());
+            dlqPublisher.publish(msg, "deserialize: " + ex.getClass().getSimpleName());
             meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
             msg.ack();
             return;
@@ -68,11 +68,12 @@ public class ScheduleEventConsumer implements MessageHandler {
                 return;
             } catch (Exception ex) {
                 lastFailure = ex;
-                log.warn("process failed attempt={} subject={}", attempt, msg.getSubject(), ex);
+                log.warn("process failed attempt={} subject={} error={}",
+                        attempt, msg.getSubject(), ex.getClass().getSimpleName());
             }
         }
-        dlqPublisher.publish(
-                msg, "processing failed after " + MAX_ATTEMPTS + " attempts: " + lastFailure);
+        dlqPublisher.publish(msg, "processing failed after " + MAX_ATTEMPTS
+                + " attempts: " + lastFailure.getClass().getSimpleName());
         meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
         msg.ack();
     }

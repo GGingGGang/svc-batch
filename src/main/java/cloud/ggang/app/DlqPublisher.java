@@ -30,7 +30,8 @@ public class DlqPublisher {
         try {
             doPublish(original, failureReason);
         } catch (Exception ex) {
-            log.error("dlq publish failed subject={}", original.getSubject(), ex);
+            log.error("dlq publish failed subject={} error={}",
+                    original.getSubject(), ex.getClass().getSimpleName());
         }
     }
 
