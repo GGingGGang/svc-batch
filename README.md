@@ -15,15 +15,14 @@ NATS consumer(reconcile + stats 증분) + 리마인더 스캔 잡(ShedLock, dry 
 - 연결: `NATS_URL` 이 닿지 않아도 앱은 정상 기동(`Nats.connectAsynchronously` 로 접속을 백그라운드 스레드에 위임) — 연결 성공(CONNECTED/RECONNECTED) 시점에 stream/durable consumer 를 기동.
 - reconcile 알고리즘(중복/역순 방어, tombstone terminal, stats 증분)은 `PLAN.md` §4 참조.
 - 실패 처리: 역직렬화 실패는 즉시, 그 외 처리 실패는 3회 재시도 후 `app.schedules.dlq.<event>`(stream `APP_SCHEDULES_DLQ`, batch 소유)로 원본 그대로 전달
-  (header `x-original-subject` / `x-failure-reason` / `x-failure-ts`) 하고 ack. 헤더 값은 개행/제어문자를 제거해 전달(`DlqPublisher`) — 실패 사유 메시지에 개행이 섞이면 NATS 헤더 인코딩이 즉시 거부하는 문제를 방어.
-- 실제 알림 발송은 확장 스코프(svc-notify) — 현재는 상태 전이("발송")까지만. 실스트림 연결(core 가 실제로 발행한 이벤트를 이 서비스가 실클러스터에서 소비하는지)은 코드/consumer 로직상 testcontainers 검증과 동일 경로라 추가 코드는 없음 — 남은 건 실클러스터 사실 확인 하나(`PLAN.md` §0 4M 평가 참고).
+  (header `x-original-subject` / `x-failure-reason` / `x-failure-ts`) 하고 서버 확인 후 ack. DLQ 발행 실패 시 원본을 ack하지 않아 30초 뒤 재전달받는다. 헤더 값은 개행/제어문자를 제거한다.
+- 실제 알림 발송은 비활성이다. 실클러스터의 core→NATS→batch 연결은 별도 확인이 필요하다.
 
 ## 리마인더 스캔 잡
 
 - `ReminderScanJob` — `@Scheduled`(기본 60초 주기, `REMINDER_SCAN_INTERVAL_MS`) + ShedLock(`@SchedulerLock("batch:lock:reminder-scan")`, Redis DB2, `SchedulingConfig`) 로 replica 간 중복 실행을 막는다.
-- 1 트랜잭션에서 `SELECT ... WHERE status='pending' AND remind_at <= UTC_TIMESTAMP(3) ORDER BY remind_at LIMIT 100 FOR UPDATE SKIP LOCKED` 로 최대 100건을 잠그고, 같은 쿼리에서 30분 grace window 초과 여부(`remind_at < UTC_TIMESTAMP(3) - INTERVAL 30 MINUTE`)를 DB 클럭 기준으로 함께 판정한다.
-- grace window 이내 → `sent`(+`sent_at`), 초과 → `skipped` 로 배치 전이. `daily_schedule_stats.reminders_sent`/`reminders_skipped` 증분.
-- **3M 은 dry run** — 상태 전이가 "발송"의 전부이며 실제 알림 채널 dispatch 는 호출하지 않는다(확장 스코프 svc-notify, `PLAN.md` §5).
+- 1 트랜잭션에서 `SELECT ... WHERE status='pending' AND remind_at <= UTC_TIMESTAMP(3) ORDER BY remind_at LIMIT 100 FOR UPDATE SKIP LOCKED` 로 최대 100건을 잠근다.
+- 발송 비활성 데모에서는 도래한 작업을 `skipped`로 마감하고 `reminders_skipped`만 증분한다. `sent_at`과 `reminders_sent`는 실제 발송 성공 전까지 변경하지 않는다.
 
 ## Tombstone Purge
 
@@ -35,7 +34,7 @@ NATS consumer(reconcile + stats 증분) + 리마인더 스캔 잡(ShedLock, dry 
 
 - `/metrics` 는 앱 단일 포트(actuator `management.endpoints.web.path-mapping.prometheus=metrics`) — 별도 포트 없음.
 - RED: `/healthz`·`/readyz` 는 actuator 자동계측(`http_server_requests_seconds_*`)으로 커버.
-- 도메인 카운터: `reminders_scanned_total` / `reminders_sent_total` / `reminders_skipped_total`, `reminder_scan_duration_seconds`(Timer), `reminder_scan_runs_total{result}`, `schedule_events_consumed_total{subject}` / `schedule_events_dlq_total{subject}`, `tombstone_purge_runs_total` / `tombstone_purged_total`.
+- 도메인 카운터: `reminders_scanned_total` / `reminders_skipped_total`, `reminder_scan_duration_seconds`(Timer), `reminder_scan_runs_total{result}`, `schedule_events_consumed_total{subject}` / `schedule_events_dlq_total{subject}` / `schedule_events_dlq_failures_total{subject}` / `schedule_events_dlq_last_failure_epoch_seconds`, `tombstone_purge_runs_total` / `tombstone_purged_total`.
 
 ## Ports
 
@@ -98,7 +97,7 @@ gradle test             # 유닛만(태그 없음) — Jenkins 가 gradle --no-d
 gradle integrationTest  # 통합만(@Tag("integration")) — Docker 필요, testcontainers MySQL/Redis/NATS 자동 기동
 ```
 
-4개 테스트 클래스(`BatchMetaSchemaIntegrationTest`, `ReminderScanJobIntegrationTest`, `ScheduleEventConsumerIntegrationTest`, `TombstonePurgeJobIntegrationTest`)는 전부 `@Tag("integration")` — 순수 유닛 테스트는 아직 0개(`gradle test` 는 항상 "0 tests, BUILD SUCCESSFUL"). 이는 게이트 위반이 아니라 레포 품질 부채로 수용된 상태이며 후속 앱 기능 턴에서 상환 예정 — 배경은 `test-contract.md` §6 참고, 여기서 재논의하지 않는다.
+4개 통합 테스트 클래스(`BatchMetaSchemaIntegrationTest`, `ReminderScanJobIntegrationTest`, `ScheduleEventConsumerIntegrationTest`, `TombstonePurgeJobIntegrationTest`)는 `@Tag("integration")`로 분리되어 있다. DLQ 확인·재전달과 발송 비활성 동작은 단위 테스트에서도 검증한다.
 
 `TombstonePurgeJobIntegrationTest`는 retention(14일) 경계(오래된 tombstone 삭제·최근 tombstone 보존)와 `is_deleted=0` 행이 나이와 무관하게 보호되는지, ShedLock 이 다른 replica 점유 시 실행을 막는지를 `ReminderScanJobIntegrationTest`와 동일한 패턴(수동 락 선점)으로 검증한다.
 

@@ -15,8 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 // FOR UPDATE SKIP LOCKED 로 같은 배치 사이클 안에서 행 단위 경쟁을 피하고, ShedLock(SchedulingConfig)
 // 으로 replica 간 잡 자체의 중복 실행을 막는다(이중 방어).
-// 실제 알림 발송은 별도 서비스(svc-notify) 몫이라 여기서는 채널 dispatch 를 호출하지 않는다
-// ("발송" = pending → sent 상태 전이가 전부).
+// 실제 알림 발송이 비활성인 데모에서는 due 작업을 skipped 로 마감하고 성공으로 집계하지 않는다.
 @Component
 public class ReminderScanJob {
 
@@ -25,7 +24,7 @@ public class ReminderScanJob {
     private static final Logger log = LoggerFactory.getLogger(ReminderScanJob.class);
 
     private static final String SELECT_DUE_SQL =
-            "SELECT id, remind_at < UTC_TIMESTAMP(3) - INTERVAL 30 MINUTE AS grace_expired "
+            "SELECT id "
                     + "FROM reminder_dispatch "
                     + "WHERE status = 'pending' AND remind_at <= UTC_TIMESTAMP(3) "
                     + "ORDER BY remind_at LIMIT ? "
@@ -61,41 +60,21 @@ public class ReminderScanJob {
 
     @Transactional
     public int scanOnce() {
-        List<DueReminder> due =
+        List<byte[]> due =
                 jdbcTemplate.query(
                         SELECT_DUE_SQL,
-                        (rs, rowNum) -> new DueReminder(rs.getBytes("id"), rs.getBoolean("grace_expired")),
+                        (rs, rowNum) -> rs.getBytes("id"),
                         SCAN_LIMIT);
         if (due.isEmpty()) {
             return 0;
         }
         meterRegistry.counter("reminders_scanned_total").increment(due.size());
 
-        List<byte[]> toSend = new ArrayList<>();
-        List<byte[]> toSkip = new ArrayList<>();
-        for (DueReminder reminder : due) {
-            if (reminder.graceExpired()) {
-                toSkip.add(reminder.id());
-            } else {
-                toSend.add(reminder.id());
-            }
-        }
-
         LocalDate statDate = jdbcTemplate.queryForObject("SELECT UTC_DATE()", LocalDate.class);
-
-        if (!toSend.isEmpty()) {
-            jdbcTemplate.batchUpdate(
-                    "UPDATE reminder_dispatch SET status = 'sent', sent_at = UTC_TIMESTAMP(3) WHERE id = ?",
-                    idBatchArgs(toSend));
-            incrementStat(statDate, "reminders_sent", toSend.size());
-            meterRegistry.counter("reminders_sent_total").increment(toSend.size());
-        }
-        if (!toSkip.isEmpty()) {
-            jdbcTemplate.batchUpdate(
-                    "UPDATE reminder_dispatch SET status = 'skipped' WHERE id = ?", idBatchArgs(toSkip));
-            incrementStat(statDate, "reminders_skipped", toSkip.size());
-            meterRegistry.counter("reminders_skipped_total").increment(toSkip.size());
-        }
+        jdbcTemplate.batchUpdate(
+                "UPDATE reminder_dispatch SET status = 'skipped' WHERE id = ?", idBatchArgs(due));
+        incrementStat(statDate, "reminders_skipped", due.size());
+        meterRegistry.counter("reminders_skipped_total").increment(due.size());
 
         return due.size();
     }
@@ -122,5 +101,4 @@ public class ReminderScanJob {
         jdbcTemplate.update(sql, statDate, amount);
     }
 
-    private record DueReminder(byte[] id, boolean graceExpired) {}
 }

@@ -1,6 +1,7 @@
 package cloud.ggang.app;
 
 import io.nats.client.JetStream;
+import io.nats.client.JetStreamApiException;
 import io.nats.client.Message;
 import io.nats.client.impl.Headers;
 import io.nats.client.impl.NatsMessage;
@@ -24,23 +25,24 @@ public class DlqPublisher {
         this.connectionHolder = connectionHolder;
     }
 
-    // 실패해도 consumer 처리 흐름(ack)을 막으면 안 되므로 전체를 방어적으로 감싼다 — 헤더 값
-    // 검증 실패(개행 등)나 일시적 발행 오류가 msg.ack() 를 가로막는 회귀를 막는다.
-    public void publish(Message original, String failureReason) {
+    // 서버의 발행 확인을 받은 경우에만 true. 실패하면 원본을 ack하지 않고 재전달받는다.
+    public boolean publish(Message original, String failureReason) {
         try {
             doPublish(original, failureReason);
+            return true;
         } catch (Exception ex) {
             log.error("dlq publish failed subject={} error={}",
                     original.getSubject(), ex.getClass().getSimpleName());
+            return false;
         }
     }
 
-    private void doPublish(Message original, String failureReason) throws IOException {
+    private void doPublish(Message original, String failureReason)
+            throws IOException, JetStreamApiException {
         JetStream jetStream = connectionHolder.jetStreamOrNull();
         if (jetStream == null) {
             // consumer 자체가 연결 성립 후에만 메시지를 받으므로 실제로는 발생하지 않아야 하는 경로.
-            log.error("nats not connected, dropping dlq message subject={}", original.getSubject());
-            return;
+            throw new IOException("nats not connected");
         }
         Headers headers =
                 new Headers()
@@ -53,7 +55,7 @@ public class DlqPublisher {
                         .headers(headers)
                         .data(original.getData())
                         .build();
-        jetStream.publishAsync(dlqMessage);
+        jetStream.publish(dlqMessage);
     }
 
     // 헤더 값은 개행/제어문자를 허용하지 않는다 — Jackson 예외 메시지처럼 "at [Source: ...]" 를

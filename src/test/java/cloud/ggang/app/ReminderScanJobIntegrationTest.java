@@ -27,9 +27,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
-// 리마인더 스캔 잡 검증 — grace window 상태 전이, FOR UPDATE SKIP LOCKED 행 단위 경쟁 회피,
-// ShedLock 의 replica 간 중복 실행 방지("replica 2 로 중복 발송 0"). dry run 이므로 상태 전이
-// (pending -> sent/skipped)까지만 검증하고 실제 알림 채널은 다루지 않는다.
+// 리마인더 스캔 잡 검증 — 발송 비활성 시 skipped 처리, FOR UPDATE SKIP LOCKED 행 단위 경쟁 회피,
+// ShedLock 의 replica 간 중복 실행 방지. 실제 알림 채널은 다루지 않는다.
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @Tag("integration")
@@ -79,15 +78,16 @@ class ReminderScanJobIntegrationTest {
     }
 
     @Test
-    void dueReminderWithinGraceIsMarkedSentAndStatsIncremented() {
+    void dueReminderWithinGraceIsSkippedWithoutSentStats() {
         byte[] id = insertDueReminder(UUID.randomUUID(), UUID.randomUUID(), "5분 지난 리마인더", "-5");
 
         int processed = reminderScanJob.scanOnce();
 
         assertThat(processed).isEqualTo(1);
-        assertThat(statusOf(id)).isEqualTo("sent");
-        assertThat(sentAtOf(id)).isNotNull();
-        assertThat(todayStat("reminders_sent")).isGreaterThanOrEqualTo(1);
+        assertThat(statusOf(id)).isEqualTo("skipped");
+        assertThat(sentAtOf(id)).isNull();
+        assertThat(todayStat("reminders_skipped")).isEqualTo(1);
+        assertThat(todayStat("reminders_sent")).isZero();
     }
 
     @Test
@@ -128,7 +128,7 @@ class ReminderScanJobIntegrationTest {
             int processed = reminderScanJob.scanOnce();
 
             assertThat(processed).isEqualTo(1);
-            assertThat(statusOf(freeId)).isEqualTo("sent");
+            assertThat(statusOf(freeId)).isEqualTo("skipped");
             assertThat(statusOf(lockedId)).isEqualTo("pending");
 
             holder.rollback();
@@ -136,7 +136,7 @@ class ReminderScanJobIntegrationTest {
 
         int processedAfterRelease = reminderScanJob.scanOnce();
         assertThat(processedAfterRelease).isEqualTo(1);
-        assertThat(statusOf(lockedId)).isEqualTo("sent");
+        assertThat(statusOf(lockedId)).isEqualTo("skipped");
     }
 
     @Test
@@ -161,7 +161,7 @@ class ReminderScanJobIntegrationTest {
         heldByOtherReplica.get().unlock();
 
         reminderScanJob.scan();
-        assertThat(statusOf(id)).isEqualTo("sent");
+        assertThat(statusOf(id)).isEqualTo("skipped");
     }
 
     private byte[] insertDueReminder(UUID scheduleId, UUID userId, String title, String minutesOffset) {

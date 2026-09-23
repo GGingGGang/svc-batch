@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.nats.client.Message;
 import io.nats.client.MessageHandler;
+import java.time.Instant;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,6 +24,7 @@ public class ScheduleEventConsumer implements MessageHandler {
     private final ScheduleReconcileService reconcileService;
     private final DlqPublisher dlqPublisher;
     private final MeterRegistry meterRegistry;
+    private final AtomicLong lastDlqFailureEpochSeconds = new AtomicLong();
 
     public ScheduleEventConsumer(
             ObjectMapper objectMapper,
@@ -32,6 +35,7 @@ public class ScheduleEventConsumer implements MessageHandler {
         this.reconcileService = reconcileService;
         this.dlqPublisher = dlqPublisher;
         this.meterRegistry = meterRegistry;
+        meterRegistry.gauge("schedule_events_dlq_last_failure_epoch_seconds", lastDlqFailureEpochSeconds);
     }
 
     @Override
@@ -54,9 +58,7 @@ public class ScheduleEventConsumer implements MessageHandler {
             payload = objectMapper.readValue(msg.getData(), payloadType);
         } catch (Exception ex) {
             log.warn("deserialize failed subject={} error={}", msg.getSubject(), ex.getClass().getSimpleName());
-            dlqPublisher.publish(msg, "deserialize: " + ex.getClass().getSimpleName());
-            meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
-            msg.ack();
+            sendToDlq(msg, "deserialize: " + ex.getClass().getSimpleName());
             return;
         }
 
@@ -72,9 +74,19 @@ public class ScheduleEventConsumer implements MessageHandler {
                         attempt, msg.getSubject(), ex.getClass().getSimpleName());
             }
         }
-        dlqPublisher.publish(msg, "processing failed after " + MAX_ATTEMPTS
+        sendToDlq(msg, "processing failed after " + MAX_ATTEMPTS
                 + " attempts: " + lastFailure.getClass().getSimpleName());
-        meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
-        msg.ack();
+    }
+
+    private void sendToDlq(Message msg, String reason) {
+        if (dlqPublisher.publish(msg, reason)) {
+            meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
+            msg.ack();
+        } else {
+            meterRegistry.counter("schedule_events_dlq_failures_total", "subject", msg.getSubject())
+                    .increment();
+            lastDlqFailureEpochSeconds.set(Instant.now().getEpochSecond());
+            // Leave unacked: the durable consumer redelivers after its 30-second ack wait.
+        }
     }
 }

@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -33,11 +34,13 @@ class ScheduleEventConsumerTest {
         ScheduleReconcileService reconcile = mock(ScheduleReconcileService.class);
         doThrow(new IllegalStateException(secret)).when(reconcile).upsert(any());
         DlqPublisher dlq = mock(DlqPublisher.class);
+        when(dlq.publish(any(), any())).thenReturn(true);
         Logger logger = (Logger) LoggerFactory.getLogger(ScheduleEventConsumer.class);
         ListAppender<ILoggingEvent> logs = new ListAppender<>();
         logs.start();
         logger.addAppender(logs);
-        try (SimpleMeterRegistry meters = new SimpleMeterRegistry()) {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        try {
             ScheduleEventConsumer consumer = new ScheduleEventConsumer(
                     new ObjectMapper(), reconcile, dlq, meters);
             consumer.onMessage(message);
@@ -53,8 +56,36 @@ class ScheduleEventConsumerTest {
             });
             verify(message, times(2)).ack();
         } finally {
+            meters.close();
             logger.detachAppender(logs);
             logs.stop();
+        }
+    }
+
+    @Test
+    void failedDlqPublishLeavesOriginalUnackedForRedelivery() {
+        Message message = mock(Message.class);
+        when(message.getSubject()).thenReturn(NatsSubjects.SCHEDULE_CREATED);
+        when(message.getData()).thenReturn("{".getBytes(StandardCharsets.UTF_8));
+        DlqPublisher dlq = mock(DlqPublisher.class);
+        when(dlq.publish(any(), any())).thenReturn(false);
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        try {
+            ScheduleEventConsumer consumer = new ScheduleEventConsumer(
+                    new ObjectMapper(), mock(ScheduleReconcileService.class), dlq, meters);
+            consumer.onMessage(message);
+
+            verify(message, never()).ack();
+            assertThat(meters.counter("schedule_events_dlq_failures_total", "subject", NatsSubjects.SCHEDULE_CREATED)
+                            .count())
+                    .isEqualTo(1);
+            assertThat(meters.counter("schedule_events_dlq_total", "subject", NatsSubjects.SCHEDULE_CREATED)
+                            .count())
+                    .isZero();
+            assertThat(meters.get("schedule_events_dlq_last_failure_epoch_seconds").gauge().value())
+                    .isPositive();
+        } finally {
+            meters.close();
         }
     }
 }
