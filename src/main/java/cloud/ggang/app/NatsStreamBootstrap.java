@@ -58,8 +58,12 @@ public class NatsStreamBootstrap {
             log.info("nats consumer started durable={}", NatsSubjects.CONSUMER_NAME);
         } catch (Exception ex) {
             started.set(false);
-            log.error("nats stream/consumer bootstrap failed, will retry on next reconnect", ex);
+            log.error("nats stream/consumer bootstrap failed error={}", ex.getClass().getSimpleName());
         }
+    }
+
+    public boolean isStarted() {
+        return started.get() && messageConsumer != null;
     }
 
     @PreDestroy

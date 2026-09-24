@@ -42,35 +42,44 @@ public class ScheduleReconcileService {
 
     @Transactional
     public void upsert(ScheduleEventPayload payload) {
+        if (payload.status() != null && !List.of("confirmed", "tentative", "cancelled").contains(payload.status())) {
+            throw new IllegalArgumentException("invalid schedule status");
+        }
         byte[] scheduleId = UuidBytes.toBytes(UUID.fromString(payload.scheduleId()));
         byte[] userId = UuidBytes.toBytes(UUID.fromString(payload.userId()));
         Instant occurredAt = payload.occurredAt();
 
         EventState existing = selectStateForUpdate(scheduleId);
-        if (existing != null && (existing.deleted() || !occurredAt.isAfter(existing.lastEventAt()))) {
+        if (existing != null && (existing.deleted() || isStale(existing, payload.revision(), occurredAt))) {
             // 이미 처리됐거나 더 최신 이벤트면 no-op — 변경 없이 커밋.
             return;
         }
 
         if (existing == null) {
             jdbcTemplate.update(
-                    "INSERT INTO schedule_event_state (schedule_id, user_id, last_event_at, is_deleted) "
-                            + "VALUES (?, ?, ?, 0)",
+                    "INSERT INTO schedule_event_state (schedule_id, user_id, last_event_at, last_revision, is_deleted) "
+                            + "VALUES (?, ?, ?, ?, 0)",
                     scheduleId,
                     userId,
-                    toLocalDateTime(occurredAt));
+                    toLocalDateTime(occurredAt),
+                    payload.revision());
             // 최초 관측 (updated 선착도 포함) — schedules_created 증분.
             incrementCreatedStats(occurredAt, payload.source());
         } else {
             jdbcTemplate.update(
-                    "UPDATE schedule_event_state SET last_event_at = ? WHERE schedule_id = ?",
+                    "UPDATE schedule_event_state SET last_event_at = ?, last_revision = ? WHERE schedule_id = ?",
                     toLocalDateTime(occurredAt),
+                    payload.revision(),
                     scheduleId);
         }
 
         // 구 pending 리마인더 정리 (sent/failed/skipped 이력은 보존).
         jdbcTemplate.update(
                 "DELETE FROM reminder_dispatch WHERE schedule_id = ? AND status = 'pending'", scheduleId);
+
+        if ("cancelled".equals(payload.status())) {
+            return;
+        }
 
         for (ReminderPayload reminder : payload.reminders()) {
             if ("none".equals(reminder.channel())) {
@@ -90,18 +99,21 @@ public class ScheduleReconcileService {
         boolean newlyDeleted;
         if (existing == null) {
             jdbcTemplate.update(
-                    "INSERT INTO schedule_event_state (schedule_id, user_id, last_event_at, is_deleted) "
-                            + "VALUES (?, ?, ?, 1)",
+                    "INSERT INTO schedule_event_state (schedule_id, user_id, last_event_at, last_revision, is_deleted) "
+                            + "VALUES (?, ?, ?, ?, 1)",
                     scheduleId,
                     userId,
-                    toLocalDateTime(occurredAt));
+                    toLocalDateTime(occurredAt),
+                    payload.revision());
             newlyDeleted = true;
         } else {
             newlyDeleted = !existing.deleted();
             jdbcTemplate.update(
                     "UPDATE schedule_event_state SET is_deleted = 1, "
-                            + "last_event_at = GREATEST(last_event_at, ?) WHERE schedule_id = ?",
+                            + "last_event_at = GREATEST(last_event_at, ?), "
+                            + "last_revision = COALESCE(?, last_revision) WHERE schedule_id = ?",
                     toLocalDateTime(occurredAt),
+                    payload.revision(),
                     scheduleId);
         }
 
@@ -140,11 +152,12 @@ public class ScheduleReconcileService {
     private EventState selectStateForUpdate(byte[] scheduleId) {
         List<EventState> rows =
                 jdbcTemplate.query(
-                        "SELECT last_event_at, is_deleted FROM schedule_event_state "
+                        "SELECT last_event_at, last_revision, is_deleted FROM schedule_event_state "
                                 + "WHERE schedule_id = ? FOR UPDATE",
                         (rs, rowNum) ->
                                 new EventState(
                                         rs.getTimestamp("last_event_at").toInstant(),
+                                        rs.getObject("last_revision", Long.class),
                                         rs.getBoolean("is_deleted")),
                         scheduleId);
         return rows.isEmpty() ? null : rows.get(0);
@@ -190,5 +203,12 @@ public class ScheduleReconcileService {
         return instant.atZone(ZoneOffset.UTC).toLocalDate();
     }
 
-    private record EventState(Instant lastEventAt, boolean deleted) {}
+    private boolean isStale(EventState existing, Long revision, Instant occurredAt) {
+        if (revision != null && existing.lastRevision() != null) {
+            return revision <= existing.lastRevision();
+        }
+        return existing.lastRevision() != null || !occurredAt.isAfter(existing.lastEventAt());
+    }
+
+    private record EventState(Instant lastEventAt, Long lastRevision, boolean deleted) {}
 }

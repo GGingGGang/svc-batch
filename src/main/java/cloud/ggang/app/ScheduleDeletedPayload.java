@@ -9,4 +9,5 @@ import java.time.Instant;
 public record ScheduleDeletedPayload(
         @JsonProperty("schedule_id") String scheduleId,
         @JsonProperty("user_id") String userId,
+        @JsonProperty("revision") Long revision,
         @JsonProperty("occurred_at") Instant occurredAt) {}

@@ -10,6 +10,7 @@ import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 // nats.java 는 동기 connect() 가 초기 접속 실패 시 그대로 던져버려(연결 재시도 옵션이 없음 —
@@ -56,6 +57,19 @@ public class NatsConnectionHolder {
     public JetStream jetStreamOrNull() throws IOException {
         Connection conn = connection;
         return conn == null ? null : conn.jetStream();
+    }
+
+    public boolean isConnected() {
+        Connection conn = connection;
+        return conn != null && conn.getStatus() == Connection.Status.CONNECTED;
+    }
+
+    @Scheduled(fixedDelayString = "${app.nats.bootstrap-retry-ms:30000}")
+    public void retryBootstrap() {
+        Connection conn = connection;
+        if (isConnected()) {
+            applicationContext.getBean(NatsStreamBootstrap.class).bootstrap(conn);
+        }
     }
 
     @PreDestroy

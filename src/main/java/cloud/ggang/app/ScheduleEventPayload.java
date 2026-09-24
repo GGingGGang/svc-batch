@@ -16,6 +16,8 @@ public record ScheduleEventPayload(
         @JsonProperty("end_at") Instant endAt,
         @JsonProperty("all_day") boolean allDay,
         @JsonProperty("source") String source,
+        @JsonProperty("status") String status,
+        @JsonProperty("revision") Long revision,
         @JsonProperty("reminders") List<ReminderPayload> reminders,
         @JsonProperty("occurred_at") Instant occurredAt) {
 

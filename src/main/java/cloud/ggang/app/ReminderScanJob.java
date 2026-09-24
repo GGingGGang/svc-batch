@@ -12,6 +12,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 // FOR UPDATE SKIP LOCKED 로 같은 배치 사이클 안에서 행 단위 경쟁을 피하고, ShedLock(SchedulingConfig)
 // 으로 replica 간 잡 자체의 중복 실행을 막는다(이중 방어).
@@ -32,10 +34,13 @@ public class ReminderScanJob {
 
     private final JdbcTemplate jdbcTemplate;
     private final MeterRegistry meterRegistry;
+    private final TransactionTemplate transactionTemplate;
 
-    public ReminderScanJob(JdbcTemplate jdbcTemplate, MeterRegistry meterRegistry) {
+    public ReminderScanJob(JdbcTemplate jdbcTemplate, MeterRegistry meterRegistry,
+            PlatformTransactionManager transactionManager) {
         this.jdbcTemplate = jdbcTemplate;
         this.meterRegistry = meterRegistry;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     @Scheduled(
@@ -45,10 +50,12 @@ public class ReminderScanJob {
     public void scan() {
         Timer.Sample sample = Timer.start(meterRegistry);
         try {
-            int scanned = scanOnce();
+            int scanned = transactionTemplate.execute(status -> scanOnce());
             sample.stop(meterRegistry.timer("reminder_scan_duration_seconds"));
             meterRegistry.counter("reminder_scan_runs_total", "result", "success").increment();
             if (scanned > 0) {
+                meterRegistry.counter("reminders_scanned_total").increment(scanned);
+                meterRegistry.counter("reminders_skipped_total").increment(scanned);
                 log.info("reminder scan processed rows={}", scanned);
             }
         } catch (RuntimeException ex) {
@@ -68,14 +75,10 @@ public class ReminderScanJob {
         if (due.isEmpty()) {
             return 0;
         }
-        meterRegistry.counter("reminders_scanned_total").increment(due.size());
-
         LocalDate statDate = jdbcTemplate.queryForObject("SELECT UTC_DATE()", LocalDate.class);
         jdbcTemplate.batchUpdate(
                 "UPDATE reminder_dispatch SET status = 'skipped' WHERE id = ?", idBatchArgs(due));
         incrementStat(statDate, "reminders_skipped", due.size());
-        meterRegistry.counter("reminders_skipped_total").increment(due.size());
-
         return due.size();
     }
 
