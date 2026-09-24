@@ -5,11 +5,12 @@ import io.nats.client.ConnectionListener;
 import io.nats.client.JetStream;
 import io.nats.client.Nats;
 import io.nats.client.Options;
-import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.ApplicationContext;
+import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -34,7 +35,7 @@ public class NatsConnectionHolder {
         this.applicationContext = applicationContext;
     }
 
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent.class)
     public void connect() throws InterruptedException {
         Options options =
                 new Options.Builder()
