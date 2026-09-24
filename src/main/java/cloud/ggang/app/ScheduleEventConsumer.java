@@ -5,8 +5,11 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.nats.client.Message;
 import io.nats.client.MessageHandler;
 import java.time.Instant;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -18,6 +21,7 @@ import org.springframework.stereotype.Component;
 public class ScheduleEventConsumer implements MessageHandler {
 
     private static final int MAX_ATTEMPTS = 3;
+    private static final Pattern TRACEPARENT = Pattern.compile("(?i)^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$");
     private static final Logger log = LoggerFactory.getLogger(ScheduleEventConsumer.class);
 
     private final ObjectMapper objectMapper;
@@ -53,12 +57,13 @@ public class ScheduleEventConsumer implements MessageHandler {
     }
 
     private <T> void process(Message msg, Class<T> payloadType, Consumer<T> handler) {
+        String errorId = errorId(msg);
         T payload;
         try {
             payload = objectMapper.readValue(msg.getData(), payloadType);
         } catch (Exception ex) {
-            log.warn("deserialize failed subject={} error={}", msg.getSubject(), ex.getClass().getSimpleName());
-            sendToDlq(msg, "deserialize: " + ex.getClass().getSimpleName());
+            log.warn("deserialize failed error_id={} subject={} error={}", errorId, msg.getSubject(), ex.getClass().getSimpleName());
+            sendToDlq(msg, "deserialize: " + ex.getClass().getSimpleName(), errorId);
             return;
         }
 
@@ -70,16 +75,16 @@ public class ScheduleEventConsumer implements MessageHandler {
                 return;
             } catch (Exception ex) {
                 lastFailure = ex;
-                log.warn("process failed attempt={} subject={} error={}",
-                        attempt, msg.getSubject(), ex.getClass().getSimpleName());
+                log.warn("process failed error_id={} attempt={} subject={} error={}",
+                        errorId, attempt, msg.getSubject(), ex.getClass().getSimpleName());
             }
         }
         sendToDlq(msg, "processing failed after " + MAX_ATTEMPTS
-                + " attempts: " + lastFailure.getClass().getSimpleName());
+                + " attempts: " + lastFailure.getClass().getSimpleName(), errorId);
     }
 
-    private void sendToDlq(Message msg, String reason) {
-        if (dlqPublisher.publish(msg, reason)) {
+    private void sendToDlq(Message msg, String reason, String errorId) {
+        if (dlqPublisher.publish(msg, reason, errorId)) {
             meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
             msg.ack();
         } else {
@@ -88,5 +93,25 @@ public class ScheduleEventConsumer implements MessageHandler {
             lastDlqFailureEpochSeconds.set(Instant.now().getEpochSecond());
             // Leave unacked: the durable consumer redelivers after its 30-second ack wait.
         }
+    }
+
+    private String errorId(Message msg) {
+        if (msg.getHeaders() == null) {
+            return UUID.randomUUID().toString();
+        }
+        String requestId = msg.getHeaders().getFirst("x-request-id");
+        if (requestId != null) {
+            try {
+                UUID parsed = UUID.fromString(requestId);
+                if (parsed.toString().equalsIgnoreCase(requestId)) {
+                    return parsed.toString();
+                }
+            } catch (IllegalArgumentException ignored) {
+                // Untrusted headers are never copied into logs or DLQ identifiers.
+            }
+        }
+        String traceparent = msg.getHeaders().getFirst("traceparent");
+        Matcher match = traceparent == null ? null : TRACEPARENT.matcher(traceparent);
+        return match != null && match.matches() ? match.group(1).toLowerCase() : UUID.randomUUID().toString();
     }
 }

@@ -26,18 +26,18 @@ public class DlqPublisher {
     }
 
     // 서버의 발행 확인을 받은 경우에만 true. 실패하면 원본을 ack하지 않고 재전달받는다.
-    public boolean publish(Message original, String failureReason) {
+    public boolean publish(Message original, String failureReason, String errorId) {
         try {
-            doPublish(original, failureReason);
+            doPublish(original, failureReason, errorId);
             return true;
         } catch (Exception ex) {
-            log.error("dlq publish failed subject={} error={}",
-                    original.getSubject(), ex.getClass().getSimpleName());
+            log.error("dlq publish failed error_id={} subject={} error={}",
+                    errorId, original.getSubject(), ex.getClass().getSimpleName());
             return false;
         }
     }
 
-    private void doPublish(Message original, String failureReason)
+    private void doPublish(Message original, String failureReason, String errorId)
             throws IOException, JetStreamApiException {
         JetStream jetStream = connectionHolder.jetStreamOrNull();
         if (jetStream == null) {
@@ -47,6 +47,7 @@ public class DlqPublisher {
         Headers headers =
                 new Headers()
                         .add("x-original-subject", original.getSubject())
+                        .add("x-error-id", errorId)
                         .add("x-failure-reason", sanitize(failureReason))
                         .add("x-failure-ts", Instant.now().toString());
         Message dlqMessage =

@@ -46,11 +46,6 @@ app:
   # 간 중복 실행을 막는다.
   reminder-scan:
     interval-ms: ${REMINDER_SCAN_INTERVAL_MS:60000}
-  # tombstone purge 잡(TombstonePurgeJob) 주기 — 기본 7일(PLAN.md §6, ShedLock 은 reminder-scan 과
-  # 동일하게 replica 중복 실행 방지). retention(14d, is_deleted=1 행을 얼마나 오래 보관할지)은 상수라
-  # env 로 노출하지 않는다.
-  tombstone-purge:
-    interval-ms: ${TOMBSTONE_PURGE_INTERVAL_MS:604800000}
 
 # actuator 의 prometheus 엔드포인트를 /metrics 로 노출 (go-app 씨앗과 동일 경로)
 management:

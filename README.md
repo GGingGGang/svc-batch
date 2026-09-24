@@ -24,15 +24,15 @@ NATS consumer(reconcile + stats 증분) + 리마인더 스캔 잡(ShedLock, dry 
 - 1 트랜잭션에서 `SELECT ... WHERE status='pending' AND remind_at <= UTC_TIMESTAMP(3) ORDER BY remind_at LIMIT 100 FOR UPDATE SKIP LOCKED` 로 최대 100건을 잠근다.
 - 발송 비활성 데모에서는 도래한 작업을 `skipped`로 마감하고 `reminders_skipped`만 증분한다. `sent_at`과 `reminders_sent`는 실제 발송 성공 전까지 변경하지 않는다.
 
-## Tombstone Purge
+## 삭제 tombstone
 
-- `TombstonePurgeJob` — `@Scheduled`(기본 7일 주기, `TOMBSTONE_PURGE_INTERVAL_MS`) + ShedLock(`@SchedulerLock("batch:lock:tombstone-purge")`, Redis DB2, `SchedulingConfig`)로 replica 간 중복 실행을 막는다 — 리마인더 스캔 잡과 동일한 락 메커니즘.
-- `DELETE FROM schedule_event_state WHERE is_deleted=1 AND updated_at < UTC_TIMESTAMP() - INTERVAL 14 DAY` 단일 문(PLAN.md §6). retention 14일은 core 가 선언하는 NATS stream 의 `max_age`(7일, 전체문서 §7.2)보다 길게 잡아, 그 사이 재전달된 오래된 이벤트도 여전히 `is_deleted=1` tombstone 행을 만나 §4.2 의 terminal 가드로 무시되도록 보장한다.
-- `is_deleted=0` 행은 나이와 무관하게 절대 삭제되지 않는다 — 삭제 대상은 tombstone(이미 삭제 처리된 일정의 상태 행)뿐이며, 살아있는 일정의 이력 행이 아니다.
+- Core outbox는 발행 실패 이벤트를 기한 없이 재시도한다. 늦은 생성·수정 이벤트나 DLQ 재처리가 삭제 일정을 되살리지 않도록 `is_deleted=1` 행을 자동 삭제하지 않는다.
+- Tombstone은 일정마다 한 행씩 계속 쌓인다. 보존 기간을 정하려면 Core outbox·DLQ의 최대 재처리 기간을 먼저 계약해야 한다.
 
 ## Observability
 
 - `/metrics` 는 앱 단일 포트(actuator `management.endpoints.web.path-mapping.prometheus=metrics`) — 별도 포트 없음.
+- 이벤트 처리 오류는 Core의 `x-request-id`(UUID)를 `error_id` 로그와 DLQ `x-error-id` 헤더에 이어 담는다. 유효한 요청 ID가 없으면 `traceparent`의 trace ID 또는 임의 ID를 사용한다.
 - RED: `/healthz`·`/readyz` 는 actuator 자동계측(`http_server_requests_seconds_*`)으로 커버.
 - 도메인 카운터: `reminders_scanned_total` / `reminders_skipped_total`, `reminder_scan_duration_seconds`(Timer), `reminder_scan_runs_total{result}`, `schedule_events_consumed_total{subject}` / `schedule_events_dlq_total{subject}` / `schedule_events_dlq_failures_total{subject}` / `schedule_events_dlq_last_failure_epoch_seconds`, `tombstone_purge_runs_total` / `tombstone_purged_total`.
 
@@ -97,9 +97,7 @@ gradle test             # 유닛만(태그 없음) — Jenkins 가 gradle --no-d
 gradle integrationTest  # 통합만(@Tag("integration")) — Docker 필요, testcontainers MySQL/Redis/NATS 자동 기동
 ```
 
-4개 통합 테스트 클래스(`BatchMetaSchemaIntegrationTest`, `ReminderScanJobIntegrationTest`, `ScheduleEventConsumerIntegrationTest`, `TombstonePurgeJobIntegrationTest`)는 `@Tag("integration")`로 분리되어 있다. DLQ 확인·재전달과 발송 비활성 동작은 단위 테스트에서도 검증한다.
-
-`TombstonePurgeJobIntegrationTest`는 retention(14일) 경계(오래된 tombstone 삭제·최근 tombstone 보존)와 `is_deleted=0` 행이 나이와 무관하게 보호되는지, ShedLock 이 다른 replica 점유 시 실행을 막는지를 `ReminderScanJobIntegrationTest`와 동일한 패턴(수동 락 선점)으로 검증한다.
+3개 통합 테스트 클래스(`BatchMetaSchemaIntegrationTest`, `ReminderScanJobIntegrationTest`, `ScheduleEventConsumerIntegrationTest`)는 `@Tag("integration")`로 분리되어 있다. DLQ 확인·재전달과 발송 비활성 동작은 단위 테스트에서도 검증한다.
 
 `.github/workflows/test.yml` 이 push(main)/PR 마다 `gradle test` + `gradle integrationTest` 풀 스위트를 실행한다.
 

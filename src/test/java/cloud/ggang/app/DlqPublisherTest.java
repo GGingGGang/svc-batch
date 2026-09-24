@@ -11,6 +11,7 @@ import io.nats.client.Message;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class DlqPublisherTest {
 
@@ -24,10 +25,12 @@ class DlqPublisherTest {
         when(original.getData()).thenReturn("{".getBytes(StandardCharsets.UTF_8));
         DlqPublisher publisher = new DlqPublisher(holder);
 
-        assertThat(publisher.publish(original, "bad payload")).isTrue();
-        verify(jetStream).publish(any(Message.class));
+        assertThat(publisher.publish(original, "bad payload", "error-123")).isTrue();
+        ArgumentCaptor<Message> sent = ArgumentCaptor.forClass(Message.class);
+        verify(jetStream).publish(sent.capture());
+        assertThat(sent.getValue().getHeaders().getFirst("x-error-id")).isEqualTo("error-123");
 
         when(jetStream.publish(any(Message.class))).thenThrow(new IOException("unavailable"));
-        assertThat(publisher.publish(original, "bad payload")).isFalse();
+        assertThat(publisher.publish(original, "bad payload", "error-123")).isFalse();
     }
 }

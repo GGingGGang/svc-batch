@@ -218,6 +218,11 @@ class ScheduleEventConsumerIntegrationTest {
                 .atMost(Duration.ofSeconds(20))
                 .untilAsserted(() -> assertThat(reminderStatus(scheduleId)).isEqualTo("skipped"));
 
+        // Core outbox는 무기한 재시도하므로 오래된 삭제 tombstone도 재처리 방어에 필요하다.
+        jdbcTemplate.update(
+                "UPDATE schedule_event_state SET updated_at = UTC_TIMESTAMP(3) - INTERVAL 46 DAY WHERE schedule_id = ?",
+                toBytes(scheduleId));
+
         // occurred_at 이 delete 보다 더 최신인 updated 가 나중에 와도 delete 는 terminal — 무시되어야 함.
         String lateUpdateJson =
                 upsertJson(
@@ -251,6 +256,7 @@ class ScheduleEventConsumerIntegrationTest {
 
         assertThat(new String(dlqMessage.getData(), StandardCharsets.UTF_8)).isEqualTo(badJson);
         assertThat(headerValue(dlqMessage, "x-original-subject")).isEqualTo(NatsSubjects.SCHEDULE_CREATED);
+        assertThat(headerValue(dlqMessage, "x-error-id")).isNotBlank();
         assertThat(headerValue(dlqMessage, "x-failure-reason")).isNotBlank();
         assertThat(headerValue(dlqMessage, "x-failure-ts")).isNotBlank();
     }
