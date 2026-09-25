@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -101,5 +102,26 @@ class BatchRecoveryTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
         assertThat(response.getBody()).containsEntry("events", "unavailable");
         verify(connection).close();
+    }
+
+    @Test
+    void readinessRejectsMissingBatchTable() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.queryForObject("SELECT 1", Integer.class)).thenReturn(1);
+        doThrow(new IllegalStateException("table missing"))
+                .when(jdbc).execute("SELECT 1 FROM reminder_dispatch LIMIT 0");
+        RedisConnectionFactory redis = mock(RedisConnectionFactory.class);
+        RedisConnection connection = mock(RedisConnection.class);
+        when(redis.getConnection()).thenReturn(connection);
+        NatsConnectionHolder holder = mock(NatsConnectionHolder.class);
+        NatsStreamBootstrap bootstrap = mock(NatsStreamBootstrap.class);
+        when(holder.isConnected()).thenReturn(true);
+        when(bootstrap.isStarted()).thenReturn(true);
+
+        var response = new HealthController(jdbc, redis, holder, bootstrap).readyz();
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getBody()).containsEntry("database", "ready")
+                .containsEntry("schema", "unavailable");
     }
 }

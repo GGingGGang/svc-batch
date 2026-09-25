@@ -32,6 +32,11 @@ public class HealthController {
     @GetMapping("/readyz")
     public ResponseEntity<Map<String, String>> readyz() {
         boolean database = available(() -> jdbcTemplate.queryForObject("SELECT 1", Integer.class));
+        boolean schema = database && available(() -> {
+            jdbcTemplate.execute("SELECT 1 FROM schedule_event_state LIMIT 0");
+            jdbcTemplate.execute("SELECT 1 FROM reminder_dispatch LIMIT 0");
+            jdbcTemplate.execute("SELECT 1 FROM daily_schedule_stats LIMIT 0");
+        });
         boolean redis = available(() -> {
             try (var connection = redisConnectionFactory.getConnection()) {
                 connection.ping();
@@ -39,11 +44,12 @@ public class HealthController {
         });
         boolean events = natsConnectionHolder.isConnected() && natsStreamBootstrap.isStarted();
         Map<String, String> body = Map.of(
-                "status", database && redis && events ? "ready" : "not_ready",
+                "status", schema && redis && events ? "ready" : "not_ready",
                 "database", database ? "ready" : "unavailable",
+                "schema", schema ? "ready" : "unavailable",
                 "redis", redis ? "ready" : "unavailable",
                 "events", events ? "ready" : "unavailable");
-        return database && redis && events ? ResponseEntity.ok(body) : ResponseEntity.status(503).body(body);
+        return schema && redis && events ? ResponseEntity.ok(body) : ResponseEntity.status(503).body(body);
     }
 
     private boolean available(Runnable check) {
