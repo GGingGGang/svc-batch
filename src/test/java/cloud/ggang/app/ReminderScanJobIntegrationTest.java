@@ -88,6 +88,8 @@ class ReminderScanJobIntegrationTest {
         assertThat(sentAtOf(id)).isNull();
         assertThat(todayStat("reminders_skipped")).isEqualTo(1);
         assertThat(todayStat("reminders_sent")).isZero();
+        assertThat(reminderScanJob.scanOnce()).isZero();
+        assertThat(todayStat("reminders_skipped")).isEqualTo(1);
     }
 
     @Test

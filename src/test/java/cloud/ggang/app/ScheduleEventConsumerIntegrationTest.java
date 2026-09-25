@@ -82,6 +82,7 @@ class ScheduleEventConsumerIntegrationTest {
 
         String natsUrl = "nats://" + NATS.getHost() + ":" + NATS.getMappedPort(4222);
         registry.add("app.nats.url", () -> natsUrl);
+        registry.add("app.nats.bootstrap-retry-ms", () -> "3600000");
 
         testConnection = Nats.connect(natsUrl);
         testJetStream = testConnection.jetStream();
@@ -113,6 +114,26 @@ class ScheduleEventConsumerIntegrationTest {
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private ScheduleReconcileService reconcileService;
+    @Autowired private NatsStreamBootstrap natsStreamBootstrap;
+
+    @Test
+    void queuedEventIsConsumedAfterWorkerRestarts() throws Exception {
+        UUID scheduleId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        await().atMost(Duration.ofSeconds(20)).until(natsStreamBootstrap::isStarted);
+        natsStreamBootstrap.shutdown();
+        assertThat(natsStreamBootstrap.isStarted()).isFalse();
+
+        send(NatsSubjects.SCHEDULE_CREATED, upsertJson(scheduleId, userId, "meeting",
+                now.plus(Duration.ofDays(2)), "manual",
+                List.of(Map.of("minutes_before", 30, "channel", "push")), now));
+        assertThat(reminderCount(scheduleId)).isZero();
+
+        natsStreamBootstrap.bootstrap(testConnection);
+        awaitReminderCount(scheduleId, 1);
+        assertThat(reminderStatus(scheduleId)).isEqualTo("pending");
+    }
 
     @Test
     void cancellingAndReconfirmingReopensOnlyFutureReminder() {

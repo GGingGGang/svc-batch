@@ -70,7 +70,9 @@ public class NatsStreamBootstrap {
     public void shutdown() throws Exception {
         if (messageConsumer != null) {
             messageConsumer.close();
+            messageConsumer = null;
         }
+        started.set(false);
     }
 
     private void createOrUpdateStream(JetStreamManagement jsm, StreamConfiguration config)
