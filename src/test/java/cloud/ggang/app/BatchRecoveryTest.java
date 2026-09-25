@@ -1,11 +1,13 @@
 package cloud.ggang.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import io.nats.client.Connection;
@@ -57,6 +59,20 @@ class BatchRecoveryTest {
         assertThat(org.mockito.Mockito.mockingDetails(jdbc).getInvocations())
                 .noneMatch(call -> call.getMethod().getName().equals("update")
                         && call.getArgument(0).toString().startsWith("INSERT INTO reminder_dispatch"));
+    }
+
+    @Test
+    void unknownSourceCannotBeCountedAsManual() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        ScheduleReconcileService reconcile = new ScheduleReconcileService(jdbc);
+        Instant now = Instant.parse("2026-09-24T00:00:00Z");
+
+        assertThatThrownBy(() -> reconcile.upsert(new ScheduleEventPayload(
+                UUID.randomUUID().toString(), UUID.randomUUID().toString(), "meeting",
+                now.plusSeconds(3600), null, false, "unexpected", "confirmed", 1L,
+                List.of(), now)))
+                .isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(jdbc);
     }
 
     @Test

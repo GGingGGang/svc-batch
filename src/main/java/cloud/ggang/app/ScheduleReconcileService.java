@@ -46,6 +46,9 @@ public class ScheduleReconcileService {
 
     @Transactional
     public void upsert(ScheduleEventPayload payload) {
+        if (!"manual".equals(payload.source()) && !"ai".equals(payload.source())) {
+            throw new IllegalArgumentException("invalid schedule source");
+        }
         if (payload.status() != null && !List.of("confirmed", "tentative", "cancelled").contains(payload.status())) {
             throw new IllegalArgumentException("invalid schedule status");
         }
