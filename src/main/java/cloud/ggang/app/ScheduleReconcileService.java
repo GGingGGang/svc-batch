@@ -24,15 +24,19 @@ public class ScheduleReconcileService {
                     + "ON DUPLICATE KEY UPDATE "
                     + "title = new.title, "
                     + "start_at = new.start_at, "
-                    + "remind_at = new.remind_at, "
-                    + "status = IF(new.remind_at = reminder_dispatch.remind_at, "
+                    + "attempt_count = IF(new.remind_at = reminder_dispatch.remind_at "
+                    + "AND reminder_dispatch.status <> 'skipped', "
+                    + "reminder_dispatch.attempt_count, 0), "
+                    + "last_error = IF(new.remind_at = reminder_dispatch.remind_at "
+                    + "AND reminder_dispatch.status <> 'skipped', "
+                    + "reminder_dispatch.last_error, NULL), "
+                    + "sent_at = IF(new.remind_at = reminder_dispatch.remind_at "
+                    + "AND reminder_dispatch.status <> 'skipped', reminder_dispatch.sent_at, NULL), "
+                    + "status = IF(new.remind_at = reminder_dispatch.remind_at "
+                    + "AND reminder_dispatch.status <> 'skipped', "
                     + "reminder_dispatch.status, "
                     + "IF(new.remind_at > UTC_TIMESTAMP(3), 'pending', 'skipped')), "
-                    + "attempt_count = IF(new.remind_at = reminder_dispatch.remind_at, "
-                    + "reminder_dispatch.attempt_count, 0), "
-                    + "last_error = IF(new.remind_at = reminder_dispatch.remind_at, "
-                    + "reminder_dispatch.last_error, NULL), "
-                    + "sent_at = IF(new.remind_at = reminder_dispatch.remind_at, reminder_dispatch.sent_at, NULL)";
+                    + "remind_at = new.remind_at";
 
     private final JdbcTemplate jdbcTemplate;
 
@@ -73,13 +77,19 @@ public class ScheduleReconcileService {
                     scheduleId);
         }
 
+        if ("cancelled".equals(payload.status())) {
+            int skipped = jdbcTemplate.update(
+                    "UPDATE reminder_dispatch SET status = 'skipped' "
+                            + "WHERE schedule_id = ? AND status = 'pending'", scheduleId);
+            if (skipped > 0) {
+                incrementStat(occurredAt, "reminders_skipped", skipped);
+            }
+            return;
+        }
+
         // 구 pending 리마인더 정리 (sent/failed/skipped 이력은 보존).
         jdbcTemplate.update(
                 "DELETE FROM reminder_dispatch WHERE schedule_id = ? AND status = 'pending'", scheduleId);
-
-        if ("cancelled".equals(payload.status())) {
-            return;
-        }
 
         for (ReminderPayload reminder : payload.reminders()) {
             if ("none".equals(reminder.channel())) {

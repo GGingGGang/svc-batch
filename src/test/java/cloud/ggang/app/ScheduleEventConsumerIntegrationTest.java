@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -111,6 +112,51 @@ class ScheduleEventConsumerIntegrationTest {
 
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private ScheduleReconcileService reconcileService;
+
+    @Test
+    void cancellingAndReconfirmingReopensOnlyFutureReminder() {
+        UUID scheduleId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        Instant startAt = now.plus(Duration.ofDays(2));
+        List<ReminderPayload> reminders = List.of(new ReminderPayload(30, "push"));
+
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "meeting", startAt, null, false, "manual", "confirmed", 1L, reminders, now));
+        assertThat(reminderStatus(scheduleId)).isEqualTo("pending");
+
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "meeting", startAt, null, false, "manual", "cancelled", 2L, reminders, now));
+        assertThat(reminderStatus(scheduleId)).isEqualTo("skipped");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT reminders_skipped FROM daily_schedule_stats WHERE stat_date = UTC_DATE()",
+                Integer.class)).isGreaterThanOrEqualTo(1);
+
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "meeting", startAt, null, false, "manual", "confirmed", 3L, reminders, now));
+        assertThat(reminderCount(scheduleId)).isEqualTo(1);
+        assertThat(reminderStatus(scheduleId)).isEqualTo("pending");
+
+        jdbcTemplate.update("UPDATE reminder_dispatch SET attempt_count = 2, last_error = 'old' "
+                + "WHERE schedule_id = ?", toBytes(scheduleId));
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "meeting", startAt, null, false, "manual", "cancelled", 4L, reminders, now));
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "meeting", startAt.plus(Duration.ofHours(1)), null, false, "manual", "confirmed", 5L,
+                reminders, now));
+        assertThat(reminderStatus(scheduleId)).isEqualTo("pending");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT attempt_count FROM reminder_dispatch WHERE schedule_id = ?",
+                Integer.class, toBytes(scheduleId))).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT last_error FROM reminder_dispatch WHERE schedule_id = ?",
+                String.class, toBytes(scheduleId))).isNull();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT remind_at FROM reminder_dispatch WHERE schedule_id = ?",
+                java.time.LocalDateTime.class, toBytes(scheduleId)))
+                .isEqualTo(startAt.plus(Duration.ofMinutes(30)).atZone(ZoneOffset.UTC).toLocalDateTime());
+    }
 
     @Test
     void duplicateCreatedEventIsIdempotent() throws Exception {
