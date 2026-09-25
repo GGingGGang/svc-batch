@@ -33,9 +33,14 @@ public class HealthController {
     public ResponseEntity<Map<String, String>> readyz() {
         boolean database = available(() -> jdbcTemplate.queryForObject("SELECT 1", Integer.class));
         boolean schema = database && available(() -> {
-            jdbcTemplate.execute("SELECT 1 FROM schedule_event_state LIMIT 0");
-            jdbcTemplate.execute("SELECT 1 FROM reminder_dispatch LIMIT 0");
-            jdbcTemplate.execute("SELECT 1 FROM daily_schedule_stats LIMIT 0");
+            jdbcTemplate.execute("SELECT schedule_id, user_id, last_event_at, last_revision, is_deleted "
+                    + "FROM schedule_event_state LIMIT 0");
+            jdbcTemplate.execute("SELECT id, schedule_id, user_id, title, minutes_before, channel, "
+                    + "start_at, remind_at, status, attempt_count, last_error, sent_at "
+                    + "FROM reminder_dispatch LIMIT 0");
+            jdbcTemplate.execute("SELECT stat_date, schedules_created, schedules_created_ai, "
+                    + "schedules_created_manual, schedules_deleted, reminders_sent, reminders_skipped, "
+                    + "reminders_failed FROM daily_schedule_stats LIMIT 0");
         });
         boolean redis = available(() -> {
             try (var connection = redisConnectionFactory.getConnection()) {
