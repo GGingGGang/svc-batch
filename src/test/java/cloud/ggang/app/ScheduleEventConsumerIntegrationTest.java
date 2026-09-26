@@ -117,6 +117,40 @@ class ScheduleEventConsumerIntegrationTest {
     @Autowired private NatsStreamBootstrap natsStreamBootstrap;
 
     @Test
+    void pastReminderStartsSkippedWithoutDelivery() {
+        UUID scheduleId = UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), UUID.randomUUID().toString(),
+                "past meeting", now.minus(Duration.ofDays(1)), null, false, "manual", "confirmed",
+                1L, List.of(new ReminderPayload(30, "push")), now));
+
+        assertThat(reminderStatus(scheduleId)).isEqualTo("skipped");
+        assertThat(jdbcTemplate.queryForObject("SELECT sent_at FROM reminder_dispatch WHERE schedule_id = ?",
+                java.time.LocalDateTime.class, toBytes(scheduleId))).isNull();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT reminders_sent FROM daily_schedule_stats WHERE stat_date = ?",
+                Integer.class, now.atZone(ZoneOffset.UTC).toLocalDate())).isZero();
+    }
+
+    @Test
+    void aiAndManualCreationsHaveSeparateCounts() {
+        Instant occurredAt = Instant.parse("2026-03-02T00:00:00Z");
+        for (String source : List.of("ai", "manual")) {
+            reconcileService.upsert(new ScheduleEventPayload(UUID.randomUUID().toString(),
+                    UUID.randomUUID().toString(), "meeting", occurredAt.plus(Duration.ofDays(1)),
+                    null, false, source, "confirmed", 1L, List.of(), occurredAt));
+        }
+
+        Map<String, Object> stats = jdbcTemplate.queryForMap(
+                "SELECT schedules_created, schedules_created_ai, schedules_created_manual "
+                        + "FROM daily_schedule_stats WHERE stat_date = '2026-03-02'");
+        assertThat(stats).containsEntry("schedules_created", 2)
+                .containsEntry("schedules_created_ai", 1)
+                .containsEntry("schedules_created_manual", 1);
+    }
+
+    @Test
     void queuedEventIsConsumedAfterWorkerRestarts() throws Exception {
         UUID scheduleId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
