@@ -125,18 +125,27 @@ class ScheduleEventConsumerIntegrationTest {
     @Test
     void pastReminderStartsSkippedWithoutDelivery() {
         UUID scheduleId = UUID.randomUUID();
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        UUID userId = UUID.randomUUID();
+        Instant occurredAt = Instant.parse("2026-01-04T00:00:00Z");
+        Instant startAt = occurredAt.minus(Duration.ofDays(1));
+        List<ReminderPayload> reminders = List.of(new ReminderPayload(30, "push"));
 
-        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), UUID.randomUUID().toString(),
-                "past meeting", now.minus(Duration.ofDays(1)), null, false, "manual", "confirmed",
-                1L, List.of(new ReminderPayload(30, "push")), now));
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "past meeting", startAt, null, false, "manual", "confirmed",
+                1L, reminders, occurredAt));
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "past meeting", startAt, null, false, "manual", "confirmed",
+                2L, reminders, occurredAt.plusMillis(1)));
 
         assertThat(reminderStatus(scheduleId)).isEqualTo("skipped");
         assertThat(jdbcTemplate.queryForObject("SELECT sent_at FROM reminder_dispatch WHERE schedule_id = ?",
                 java.time.LocalDateTime.class, toBytes(scheduleId))).isNull();
         assertThat(jdbcTemplate.queryForObject(
-                "SELECT reminders_sent FROM daily_schedule_stats WHERE stat_date = ?",
-                Integer.class, now.atZone(ZoneOffset.UTC).toLocalDate())).isZero();
+                "SELECT reminders_sent FROM daily_schedule_stats WHERE stat_date = '2026-01-04'",
+                Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT reminders_skipped FROM daily_schedule_stats WHERE stat_date = '2026-01-04'",
+                Integer.class)).isEqualTo(1);
     }
 
     @Test

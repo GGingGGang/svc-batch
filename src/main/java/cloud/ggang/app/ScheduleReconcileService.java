@@ -98,7 +98,7 @@ public class ScheduleReconcileService {
             if ("none".equals(reminder.channel())) {
                 continue;
             }
-            upsertReminder(scheduleId, userId, payload.title(), payload.startAt(), reminder);
+            upsertReminder(scheduleId, userId, payload.title(), payload.startAt(), reminder, occurredAt);
         }
     }
 
@@ -146,9 +146,15 @@ public class ScheduleReconcileService {
     }
 
     private void upsertReminder(
-            byte[] scheduleId, byte[] userId, String title, Instant startAt, ReminderPayload reminder) {
+            byte[] scheduleId, byte[] userId, String title, Instant startAt, ReminderPayload reminder,
+            Instant occurredAt) {
         Instant remindAt = startAt.minus(reminder.minutesBefore(), ChronoUnit.MINUTES);
         LocalDateTime remindAtValue = toLocalDateTime(remindAt);
+        List<String> previous = jdbcTemplate.query(
+                "SELECT status FROM reminder_dispatch WHERE schedule_id = ? "
+                        + "AND minutes_before = ? AND channel = ? FOR UPDATE",
+                (rs, rowNum) -> rs.getString("status"),
+                scheduleId, reminder.minutesBefore(), reminder.channel());
         jdbcTemplate.update(
                 REMINDER_UPSERT_SQL,
                 UuidBytes.toBytes(Uuid7Generator.generate()),
@@ -160,6 +166,13 @@ public class ScheduleReconcileService {
                 toLocalDateTime(startAt),
                 remindAtValue,
                 remindAtValue);
+        String current = jdbcTemplate.queryForObject(
+                "SELECT status FROM reminder_dispatch WHERE schedule_id = ? "
+                        + "AND minutes_before = ? AND channel = ?",
+                String.class, scheduleId, reminder.minutesBefore(), reminder.channel());
+        if ("skipped".equals(current) && (previous.isEmpty() || !"skipped".equals(previous.get(0)))) {
+            incrementStat(occurredAt, "reminders_skipped", 1);
+        }
     }
 
     private EventState selectStateForUpdate(byte[] scheduleId) {
