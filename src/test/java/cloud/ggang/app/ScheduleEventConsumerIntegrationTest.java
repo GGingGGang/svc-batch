@@ -3,6 +3,9 @@ package cloud.ggang.app;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.nats.client.Connection;
 import io.nats.client.ConsumerContext;
@@ -16,6 +19,8 @@ import io.nats.client.api.ConsumerConfiguration;
 import io.nats.client.api.DiscardPolicy;
 import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamConfiguration;
+import io.nats.client.impl.Headers;
+import io.nats.client.impl.NatsMessage;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -34,6 +39,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -351,15 +357,31 @@ class ScheduleEventConsumerIntegrationTest {
     @Test
     void malformedPayloadGoesToDlqWithHeaders() throws Exception {
         String badJson = "{not-valid-json";
-        send(NatsSubjects.SCHEDULE_CREATED, badJson);
+        String requestId = UUID.randomUUID().toString();
+        Logger logger = (Logger) LoggerFactory.getLogger(ScheduleEventConsumer.class);
+        ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            testJetStream.publish(NatsMessage.builder()
+                    .subject(NatsSubjects.SCHEDULE_CREATED)
+                    .headers(new Headers().add("x-request-id", requestId))
+                    .data(badJson.getBytes(StandardCharsets.UTF_8))
+                    .build());
 
-        Message dlqMessage = awaitDlqMessage(NatsSubjects.dlqSubject(NatsSubjects.SCHEDULE_CREATED));
+            Message dlqMessage = awaitDlqMessage(NatsSubjects.dlqSubject(NatsSubjects.SCHEDULE_CREATED));
 
-        assertThat(new String(dlqMessage.getData(), StandardCharsets.UTF_8)).isEqualTo(badJson);
-        assertThat(headerValue(dlqMessage, "x-original-subject")).isEqualTo(NatsSubjects.SCHEDULE_CREATED);
-        assertThat(headerValue(dlqMessage, "x-error-id")).isNotBlank();
-        assertThat(headerValue(dlqMessage, "x-failure-reason")).isNotBlank();
-        assertThat(headerValue(dlqMessage, "x-failure-ts")).isNotBlank();
+            assertThat(new String(dlqMessage.getData(), StandardCharsets.UTF_8)).isEqualTo(badJson);
+            assertThat(headerValue(dlqMessage, "x-original-subject")).isEqualTo(NatsSubjects.SCHEDULE_CREATED);
+            assertThat(headerValue(dlqMessage, "x-error-id")).isEqualTo(requestId);
+            assertThat(headerValue(dlqMessage, "x-failure-reason")).isNotBlank();
+            assertThat(headerValue(dlqMessage, "x-failure-ts")).isNotBlank();
+            assertThat(logs.list).anySatisfy(event -> assertThat(event.getFormattedMessage())
+                    .contains("error_id=" + requestId).doesNotContain(badJson));
+        } finally {
+            logger.detachAppender(logs);
+            logs.stop();
+        }
     }
 
     // durable consumer(batch-reminders) 기동이 CONNECTED 이벤트 콜백에서 비동기로 이뤄지고,
