@@ -2,6 +2,14 @@ package cloud.ggang.app;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.Scope;
+import io.opentelemetry.context.propagation.TextMapGetter;
+import org.springframework.beans.factory.annotation.Autowired;
 import io.nats.client.Message;
 import io.nats.client.MessageHandler;
 import java.time.Instant;
@@ -28,24 +36,67 @@ public class ScheduleEventConsumer implements MessageHandler {
     private final ScheduleReconcileService reconcileService;
     private final DlqPublisher dlqPublisher;
     private final MeterRegistry meterRegistry;
+    private final io.opentelemetry.api.OpenTelemetry openTelemetry;
+    private final Tracer tracer;
     private final AtomicLong lastDlqFailureEpochSeconds = new AtomicLong();
 
+    @Autowired
     public ScheduleEventConsumer(
             ObjectMapper objectMapper,
             ScheduleReconcileService reconcileService,
             DlqPublisher dlqPublisher,
-            MeterRegistry meterRegistry) {
+            MeterRegistry meterRegistry,
+            io.opentelemetry.api.OpenTelemetry openTelemetry,
+            Tracer tracer) {
         this.objectMapper = objectMapper;
         this.reconcileService = reconcileService;
         this.dlqPublisher = dlqPublisher;
         this.meterRegistry = meterRegistry;
+        this.openTelemetry = openTelemetry;
+        this.tracer = tracer;
         meterRegistry.gauge("schedule_events_dlq_last_failure_epoch_seconds", lastDlqFailureEpochSeconds);
+    }
+
+    ScheduleEventConsumer(ObjectMapper objectMapper, ScheduleReconcileService reconcileService,
+            DlqPublisher dlqPublisher, MeterRegistry meterRegistry) {
+        this(objectMapper, reconcileService, dlqPublisher, meterRegistry,
+                io.opentelemetry.api.OpenTelemetry.noop(),
+                io.opentelemetry.api.OpenTelemetry.noop().getTracer("cloud.ggang.svc-batch"));
     }
 
     @Override
     public void onMessage(Message msg) {
         String subject = msg.getSubject();
         meterRegistry.counter("schedule_events_consumed_total", "subject", subject).increment();
+        Context parent = openTelemetry.getPropagators().getTextMapPropagator().extract(
+                Context.current(), msg.getHeaders(), new TextMapGetter<io.nats.client.impl.Headers>() {
+                    @Override
+                    public Iterable<String> keys(io.nats.client.impl.Headers carrier) {
+                        return carrier == null ? java.util.List.of() : carrier.keySet();
+                    }
+
+                    @Override
+                    public String get(io.nats.client.impl.Headers carrier, String key) {
+                        return carrier == null ? null : carrier.getFirst(key);
+                    }
+                });
+        Span span = tracer.spanBuilder("process " + subject)
+                .setParent(parent)
+                .setSpanKind(SpanKind.CONSUMER)
+                .startSpan();
+        try (Scope ignored = span.makeCurrent()) {
+            span.setAttribute("messaging.system", "nats");
+            span.setAttribute("messaging.destination.name", subject);
+            processMessage(msg, subject);
+        } catch (RuntimeException ex) {
+            span.setStatus(StatusCode.ERROR);
+            throw ex;
+        } finally {
+            span.end();
+        }
+    }
+
+    private void processMessage(Message msg, String subject) {
         if (NatsSubjects.SCHEDULE_CREATED.equals(subject) || NatsSubjects.SCHEDULE_UPDATED.equals(subject)) {
             process(msg, ScheduleEventPayload.class, reconcileService::upsert);
         } else if (NatsSubjects.SCHEDULE_DELETED.equals(subject)) {
@@ -84,6 +135,7 @@ public class ScheduleEventConsumer implements MessageHandler {
     }
 
     private void sendToDlq(Message msg, String reason, String errorId) {
+        Span.current().setStatus(StatusCode.ERROR);
         if (dlqPublisher.publish(msg, reason, errorId)) {
             meterRegistry.counter("schedule_events_dlq_total", "subject", msg.getSubject()).increment();
             msg.ack();

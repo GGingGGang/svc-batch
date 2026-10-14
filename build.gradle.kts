@@ -28,6 +28,7 @@ extra["netty.version"] = "4.1.138.Final"
 // Spring Boot 3.4.x 의 dependency-management 가 shedlock 을 관리하지 않으므로 명시 고정.
 // shedlock 7.x 부터는 Spring Framework 7(Boot 4) 대상이라 6.x 최신판 사용 (Spring 6.2.x 호환).
 val shedlockVersion = "6.10.0"
+val opentelemetryVersion = "1.48.0"
 
 dependencies {
     constraints {
@@ -45,6 +46,9 @@ dependencies {
     implementation("net.javacrumbs.shedlock:shedlock-provider-redis-spring:$shedlockVersion")
     runtimeOnly("com.mysql:mysql-connector-j")
     runtimeOnly("io.micrometer:micrometer-registry-prometheus")
+    implementation("io.opentelemetry:opentelemetry-api:$opentelemetryVersion")
+    implementation("io.opentelemetry:opentelemetry-sdk:$opentelemetryVersion")
+    implementation("io.opentelemetry:opentelemetry-exporter-otlp:$opentelemetryVersion")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.batch:spring-batch-test")
