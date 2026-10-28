@@ -2,6 +2,7 @@ package cloud.ggang.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -36,7 +37,7 @@ class ScheduleEventConsumerTest {
                 ("{\"title\":\"" + secret + "\",").getBytes(StandardCharsets.UTF_8),
                 ("{\"title\":\"" + secret + "\"}").getBytes(StandardCharsets.UTF_8));
         ScheduleReconcileService reconcile = mock(ScheduleReconcileService.class);
-        doThrow(new IllegalStateException(secret)).when(reconcile).upsert(any());
+        doThrow(new IllegalStateException(secret)).when(reconcile).upsert(any(), anyBoolean());
         DlqPublisher dlq = mock(DlqPublisher.class);
         when(dlq.publish(any(), any(), any())).thenReturn(true);
         Logger logger = (Logger) LoggerFactory.getLogger(ScheduleEventConsumer.class);

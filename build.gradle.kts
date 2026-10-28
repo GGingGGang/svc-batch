@@ -90,8 +90,7 @@ tasks.jar {
 }
 
 // 유닛 게이트(Jenkins, Docker 없음) — testcontainers 통합 클래스(@Tag("integration"))는 제외.
-// 태그 미부여 유닛 테스트가 아직 0개라 이 태스크는 현재 항상 "0 tests, BUILD SUCCESSFUL" — 부채는
-// test-contract.md §6 참고, 게이트 완화가 아니라 테스트 작성으로 상환한다.
+// 유닛 회귀 테스트는 여기서 실행하고, test-contract.md §6 에 기록된 부족한 통합 시나리오는 별도 task로 다룬다.
 tasks.test {
     useJUnitPlatform {
         excludeTags("integration")

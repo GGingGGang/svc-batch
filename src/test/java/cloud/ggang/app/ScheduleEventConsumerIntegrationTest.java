@@ -229,6 +229,122 @@ class ScheduleEventConsumerIntegrationTest {
     }
 
     @Test
+    void tentativeScheduleSkipsPendingReminderUntilConfirmed() {
+        UUID scheduleId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        Instant startAt = now.plus(Duration.ofDays(2));
+        List<ReminderPayload> reminders = List.of(new ReminderPayload(30, "push"));
+
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "meeting", startAt, null, false, "manual", "tentative", 1L, reminders, now));
+        assertThat(reminderStatus(scheduleId)).isEqualTo("skipped");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT reminders_skipped FROM daily_schedule_stats WHERE stat_date = UTC_DATE()",
+                Integer.class)).isGreaterThanOrEqualTo(1);
+
+        reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
+                "meeting", startAt, null, false, "manual", "confirmed", 2L, reminders, now.plusMillis(1)));
+        assertThat(reminderStatus(scheduleId)).isEqualTo("pending");
+    }
+
+    @Test
+    void creationStatsFollowCreatedFactRegardlessOfProjectionOrder() {
+        UUID userId = UUID.randomUUID();
+        Instant startAt = Instant.now().plus(Duration.ofDays(2));
+        Instant createdAt = Instant.parse("2026-01-11T12:00:00Z");
+        int createdBefore = createdCount(createdAt);
+        UUID createdThenUpdated = UUID.randomUUID();
+        reconcileService.upsert(event(createdThenUpdated, userId, "created", createdAt, startAt, 1L), true);
+        reconcileService.upsert(
+                event(createdThenUpdated, userId, "updated", createdAt.plusSeconds(60), startAt, 2L), false);
+        reconcileService.upsert(
+                event(createdThenUpdated, userId, "created replay", createdAt, startAt, 1L), true);
+        assertThat(createdCount(createdAt)).isEqualTo(createdBefore + 1);
+
+        Instant updatedAt = Instant.parse("2026-02-11T12:00:00Z");
+        Instant lateCreatedAt = updatedAt.minus(Duration.ofDays(1));
+        int lateCreatedBefore = createdCount(lateCreatedAt);
+        UUID updatedThenCreated = UUID.randomUUID();
+        reconcileService.upsert(
+                event(updatedThenCreated, userId, "updated first", updatedAt, startAt, 2L), false);
+        reconcileService.upsert(
+                event(updatedThenCreated, userId, "created late", lateCreatedAt, startAt, 1L), true);
+        assertThat(createdCount(lateCreatedAt)).isEqualTo(lateCreatedBefore + 1);
+        assertThat(reminderTitle(updatedThenCreated)).isEqualTo("updated first");
+
+        Instant deletedCreatedAt = Instant.parse("2026-03-11T12:00:00Z");
+        int deletedCreatedBefore = createdCount(deletedCreatedAt);
+        UUID deletedThenCreated = UUID.randomUUID();
+        reconcileService.delete(new ScheduleDeletedPayload(
+                deletedThenCreated.toString(), userId.toString(), 2L, deletedCreatedAt.plusSeconds(60)));
+        reconcileService.upsert(
+                event(deletedThenCreated, userId, "created after delete", deletedCreatedAt, startAt, 1L), true);
+        assertThat(createdCount(deletedCreatedAt)).isEqualTo(deletedCreatedBefore + 1);
+        assertThat(reminderCount(deletedThenCreated)).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT is_deleted FROM schedule_event_state WHERE schedule_id = ?", Boolean.class,
+                toBytes(deletedThenCreated))).isTrue();
+
+        Instant legacyCreatedAt = Instant.parse("2026-04-11T12:00:00Z");
+        int legacyBefore = createdCount(legacyCreatedAt);
+        UUID legacyState = UUID.randomUUID();
+        jdbcTemplate.update(
+                "INSERT INTO schedule_event_state (schedule_id, user_id, last_event_at, last_revision, is_deleted) "
+                        + "VALUES (?, ?, ?, 1, 0)",
+                toBytes(legacyState), toBytes(userId),
+                legacyCreatedAt.atZone(ZoneOffset.UTC).toLocalDateTime());
+        reconcileService.upsert(event(legacyState, userId, "legacy", legacyCreatedAt, startAt, 2L), true);
+        assertThat(createdCount(legacyCreatedAt)).isEqualTo(legacyBefore);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT creation_accounted FROM schedule_event_state WHERE schedule_id = ?", Boolean.class,
+                toBytes(legacyState))).isTrue();
+    }
+
+    @Test
+    void consumerUsesCreatedSubjectForStatsAndUpdatedSubjectOnlyForProjection() throws Exception {
+        UUID scheduleId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        Instant createdAt = now.minus(Duration.ofDays(1));
+        Instant updatedAt = now;
+        Instant startAt = now.plus(Duration.ofDays(2));
+        int createdBefore = createdCount(createdAt);
+        int updatedBefore = createdCount(updatedAt);
+
+        send(NatsSubjects.SCHEDULE_UPDATED, upsertJson(
+                scheduleId, userId, "updated first", startAt, "manual",
+                List.of(Map.of("minutes_before", 30, "channel", "push")), updatedAt, "confirmed", 2L));
+        awaitReminderCount(scheduleId, 1);
+        assertThat(createdCount(updatedAt)).isEqualTo(updatedBefore);
+
+        String created = upsertJson(
+                scheduleId, userId, "created late", startAt, "manual",
+                List.of(Map.of("minutes_before", 30, "channel", "push")), createdAt, "confirmed", 1L);
+        send(NatsSubjects.SCHEDULE_CREATED, created);
+        await().atMost(Duration.ofSeconds(20)).untilAsserted(
+                () -> assertThat(createdCount(createdAt)).isEqualTo(createdBefore + 1));
+        send(NatsSubjects.SCHEDULE_CREATED, created);
+        Thread.sleep(1500);
+        assertThat(createdCount(createdAt)).isEqualTo(createdBefore + 1);
+        assertThat(reminderTitle(scheduleId)).isEqualTo("updated first");
+    }
+
+    private ScheduleEventPayload event(UUID scheduleId, UUID userId, String title,
+            Instant occurredAt, Instant startAt, long revision) {
+        return new ScheduleEventPayload(scheduleId.toString(), userId.toString(), title,
+                startAt, null, false, "manual", "confirmed", revision,
+                List.of(new ReminderPayload(30, "push")), occurredAt);
+    }
+
+    private int createdCount(Instant occurredAt) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COALESCE((SELECT schedules_created FROM daily_schedule_stats WHERE stat_date = ?), 0)",
+                Integer.class, occurredAt.atZone(ZoneOffset.UTC).toLocalDate());
+        return count;
+    }
+
+    @Test
     void duplicateCreatedEventIsIdempotent() throws Exception {
         UUID scheduleId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
@@ -438,6 +554,20 @@ class ScheduleEventConsumerIntegrationTest {
             List<Map<String, Object>> reminders,
             Instant occurredAt)
             throws Exception {
+        return upsertJson(scheduleId, userId, title, startAt, source, reminders, occurredAt, null, null);
+    }
+
+    private String upsertJson(
+            UUID scheduleId,
+            UUID userId,
+            String title,
+            Instant startAt,
+            String source,
+            List<Map<String, Object>> reminders,
+            Instant occurredAt,
+            String status,
+            Long revision)
+            throws Exception {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("schedule_id", scheduleId.toString());
         payload.put("user_id", userId.toString());
@@ -446,6 +576,8 @@ class ScheduleEventConsumerIntegrationTest {
         payload.put("end_at", null);
         payload.put("all_day", false);
         payload.put("source", source);
+        payload.put("status", status);
+        payload.put("revision", revision);
         payload.put("reminders", reminders);
         payload.put("occurred_at", occurredAt.toString());
         return objectMapper.writeValueAsString(payload);

@@ -34,6 +34,6 @@ class TracingConfigurationTest {
         assertThat(TracingConfiguration.sampler("always_off", "").getDescription())
                 .isEqualTo("AlwaysOffSampler");
         assertThat(TracingConfiguration.sampler("parentbased_always_off", "").getDescription())
-                .contains("root=AlwaysOffSampler");
+                .contains("root:AlwaysOffSampler");
     }
 }

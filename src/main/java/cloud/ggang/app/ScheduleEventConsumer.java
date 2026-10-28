@@ -15,7 +15,7 @@ import io.nats.client.MessageHandler;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -98,16 +98,18 @@ public class ScheduleEventConsumer implements MessageHandler {
 
     private void processMessage(Message msg, String subject) {
         if (NatsSubjects.SCHEDULE_CREATED.equals(subject) || NatsSubjects.SCHEDULE_UPDATED.equals(subject)) {
-            process(msg, ScheduleEventPayload.class, reconcileService::upsert);
+            process(msg, ScheduleEventPayload.class,
+                    (payload, eventSubject) -> reconcileService.upsert(
+                            payload, NatsSubjects.SCHEDULE_CREATED.equals(eventSubject)));
         } else if (NatsSubjects.SCHEDULE_DELETED.equals(subject)) {
-            process(msg, ScheduleDeletedPayload.class, reconcileService::delete);
+            process(msg, ScheduleDeletedPayload.class, (payload, ignored) -> reconcileService.delete(payload));
         } else {
             log.warn("unexpected subject={}", subject);
             msg.ack();
         }
     }
 
-    private <T> void process(Message msg, Class<T> payloadType, Consumer<T> handler) {
+    private <T> void process(Message msg, Class<T> payloadType, BiConsumer<T, String> handler) {
         String errorId = errorId(msg);
         T payload;
         try {
@@ -121,7 +123,7 @@ public class ScheduleEventConsumer implements MessageHandler {
         Exception lastFailure = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                handler.accept(payload);
+                handler.accept(payload, msg.getSubject());
                 msg.ack();
                 return;
             } catch (Exception ex) {

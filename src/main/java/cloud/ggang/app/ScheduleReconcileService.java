@@ -46,6 +46,11 @@ public class ScheduleReconcileService {
 
     @Transactional
     public void upsert(ScheduleEventPayload payload) {
+        upsert(payload, true);
+    }
+
+    @Transactional
+    public void upsert(ScheduleEventPayload payload, boolean createdEvent) {
         if (!"manual".equals(payload.source()) && !"ai".equals(payload.source())) {
             throw new IllegalArgumentException("invalid schedule source");
         }
@@ -57,30 +62,33 @@ public class ScheduleReconcileService {
         Instant occurredAt = payload.occurredAt();
 
         EventState existing = selectStateForUpdate(scheduleId);
-        if (existing != null && (existing.deleted() || isStale(existing, payload.revision(), occurredAt))) {
-            // 이미 처리됐거나 더 최신 이벤트면 no-op — 변경 없이 커밋.
-            return;
-        }
-
+        boolean newlyObserved = existing == null;
         if (existing == null) {
             jdbcTemplate.update(
-                    "INSERT INTO schedule_event_state (schedule_id, user_id, last_event_at, last_revision, is_deleted) "
-                            + "VALUES (?, ?, ?, ?, 0)",
+                    "INSERT INTO schedule_event_state "
+                            + "(schedule_id, user_id, last_event_at, last_revision, is_deleted, creation_accounted) "
+                            + "VALUES (?, ?, ?, ?, 0, 0)",
                     scheduleId,
                     userId,
                     toLocalDateTime(occurredAt),
                     payload.revision());
-            // 최초 관측 (updated 선착도 포함) — schedules_created 증분.
+            existing = new EventState(occurredAt, payload.revision(), false);
+        }
+        if (createdEvent && accountCreation(scheduleId)) {
             incrementCreatedStats(occurredAt, payload.source());
-        } else {
-            jdbcTemplate.update(
-                    "UPDATE schedule_event_state SET last_event_at = ?, last_revision = ? WHERE schedule_id = ?",
-                    toLocalDateTime(occurredAt),
-                    payload.revision(),
-                    scheduleId);
+        }
+        if (existing.deleted() || (!newlyObserved && isStale(existing, payload.revision(), occurredAt))) {
+            // 이미 처리됐거나 더 최신 이벤트면 no-op — 변경 없이 커밋.
+            return;
         }
 
-        if ("cancelled".equals(payload.status())) {
+        jdbcTemplate.update(
+                "UPDATE schedule_event_state SET last_event_at = ?, last_revision = ? WHERE schedule_id = ?",
+                toLocalDateTime(occurredAt),
+                payload.revision(),
+                scheduleId);
+
+        if ("cancelled".equals(payload.status()) || "tentative".equals(payload.status())) {
             int skipped = jdbcTemplate.update(
                     "UPDATE reminder_dispatch SET status = 'skipped' "
                             + "WHERE schedule_id = ? AND status = 'pending'", scheduleId);
@@ -112,8 +120,9 @@ public class ScheduleReconcileService {
         boolean newlyDeleted;
         if (existing == null) {
             jdbcTemplate.update(
-                    "INSERT INTO schedule_event_state (schedule_id, user_id, last_event_at, last_revision, is_deleted) "
-                            + "VALUES (?, ?, ?, ?, 1)",
+                    "INSERT INTO schedule_event_state "
+                            + "(schedule_id, user_id, last_event_at, last_revision, is_deleted, creation_accounted) "
+                            + "VALUES (?, ?, ?, ?, 1, 0)",
                     scheduleId,
                     userId,
                     toLocalDateTime(occurredAt),
@@ -205,6 +214,14 @@ public class ScheduleReconcileService {
                 toUtcDate(occurredAt),
                 aiCount,
                 manualCount);
+    }
+
+    private boolean accountCreation(byte[] scheduleId) {
+        return jdbcTemplate.update(
+                        "UPDATE schedule_event_state SET creation_accounted = 1 "
+                                + "WHERE schedule_id = ? AND creation_accounted = 0",
+                        scheduleId)
+                == 1;
     }
 
     private void incrementStat(Instant occurredAt, String column, int amount) {

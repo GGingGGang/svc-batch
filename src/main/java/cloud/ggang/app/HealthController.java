@@ -33,7 +33,8 @@ public class HealthController {
     public ResponseEntity<Map<String, String>> readyz() {
         boolean database = available(() -> jdbcTemplate.queryForObject("SELECT 1", Integer.class));
         boolean schema = database && available(() -> {
-            jdbcTemplate.execute("SELECT schedule_id, user_id, last_event_at, last_revision, is_deleted "
+            jdbcTemplate.execute("SELECT schedule_id, user_id, last_event_at, last_revision, is_deleted, "
+                    + "creation_accounted "
                     + "FROM schedule_event_state LIMIT 0");
             jdbcTemplate.execute("SELECT id, schedule_id, user_id, title, minutes_before, channel, "
                     + "start_at, remind_at, status, attempt_count, last_error, sent_at "

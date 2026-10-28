@@ -56,7 +56,7 @@ class BatchRecoveryTest {
 
         reconcile.upsert(cancelled);
 
-        verify(jdbc).update(anyString(), any(byte[].class));
+        verify(jdbc).update(contains("UPDATE reminder_dispatch SET status = 'skipped'"), any(byte[].class));
         assertThat(org.mockito.Mockito.mockingDetails(jdbc).getInvocations())
                 .noneMatch(call -> call.getMethod().getName().equals("update")
                         && call.getArgument(0).toString().startsWith("INSERT INTO reminder_dispatch"));
@@ -91,12 +91,12 @@ class BatchRecoveryTest {
         String userId = UUID.randomUUID().toString();
 
         reconcile.upsert(new ScheduleEventPayload(scheduleId, userId, "old", now.plusSeconds(3600),
-                null, false, "manual", "confirmed", 1L, List.of(), now));
+                null, false, "manual", "confirmed", 1L, List.of(), now), false);
         assertThat(org.mockito.Mockito.mockingDetails(jdbc).getInvocations())
                 .noneMatch(call -> call.getMethod().getName().equals("update"));
 
         reconcile.upsert(new ScheduleEventPayload(scheduleId, userId, "new", now.plusSeconds(3600),
-                null, false, "manual", "confirmed", 3L, List.of(), now));
+                null, false, "manual", "confirmed", 3L, List.of(), now), false);
         assertThat(org.mockito.Mockito.mockingDetails(jdbc).getInvocations())
                 .anyMatch(call -> call.getMethod().getName().equals("update")
                         && call.getArgument(0).toString().contains("last_revision = ?"));
