@@ -85,6 +85,8 @@ class ScheduleEventConsumerIntegrationTest {
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("spring.data.redis.url", () -> "redis://localhost:6379/2");
+        registry.add("app.reminder-scan.initial-delay-ms", () -> "3600000");
+        registry.add("app.reminder-scan.interval-ms", () -> "3600000");
 
         String natsUrl = "nats://" + NATS.getHost() + ":" + NATS.getMappedPort(4222);
         registry.add("app.nats.url", () -> natsUrl);
@@ -513,26 +515,26 @@ class ScheduleEventConsumerIntegrationTest {
 
     // durable consumer(batch-reminders) 기동이 CONNECTED 이벤트 콜백에서 비동기로 이뤄지고,
     // APP_SCHEDULES_DLQ stream 도 그 기동 절차의 일부라 아직 안 만들어졌을 수 있어 전체를 재시도로 감싼다.
-    private Message awaitDlqMessage(String dlqSubject) {
+    private Message awaitDlqMessage(String dlqSubject) throws Exception {
         AtomicReference<Message> found = new AtomicReference<>();
+        await()
+                .atMost(Duration.ofSeconds(20))
+                .until(natsStreamBootstrap::isStarted);
+        StreamContext dlqStream = testConnection.getStreamContext(NatsSubjects.STREAM_SCHEDULES_DLQ);
+        ConsumerContext consumerContext = dlqStream.createOrUpdateConsumer(
+                ConsumerConfiguration.builder()
+                        .durable("test-schedule-created-dlq")
+                        .filterSubject(dlqSubject)
+                        .ackPolicy(AckPolicy.Explicit)
+                        .build());
         await()
                 .atMost(Duration.ofSeconds(30))
                 .pollInterval(Duration.ofMillis(500))
-                .ignoreExceptions()
-                .untilAsserted(
-                        () -> {
-                            StreamContext dlqStream =
-                                    testConnection.getStreamContext(NatsSubjects.STREAM_SCHEDULES_DLQ);
-                            ConsumerContext consumerContext =
-                                    dlqStream.createOrUpdateConsumer(
-                                            ConsumerConfiguration.builder()
-                                                    .filterSubject(dlqSubject)
-                                                    .ackPolicy(AckPolicy.Explicit)
-                                                    .build());
-                            Message msg = consumerContext.next(Duration.ofSeconds(2));
-                            assertThat(msg).as("dlq message on " + dlqSubject).isNotNull();
-                            found.set(msg);
-                        });
+                .untilAsserted(() -> {
+                    Message msg = consumerContext.next(Duration.ofSeconds(2));
+                    assertThat(msg).as("dlq message on " + dlqSubject).isNotNull();
+                    found.set(msg);
+                });
         found.get().ack();
         return found.get();
     }
