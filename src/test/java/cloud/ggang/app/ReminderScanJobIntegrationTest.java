@@ -201,7 +201,8 @@ class ReminderScanJobIntegrationTest {
     private int todayStat(String column) {
         Integer value =
                 jdbcTemplate.queryForObject(
-                        "SELECT " + column + " FROM daily_schedule_stats WHERE stat_date = UTC_DATE()",
+                        "SELECT COALESCE((SELECT " + column
+                                + " FROM daily_schedule_stats WHERE stat_date = UTC_DATE()), 0)",
                         Integer.class);
         return value == null ? 0 : value;
     }

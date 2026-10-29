@@ -170,9 +170,9 @@ public class ScheduleReconcileService {
     private void incrementCreatedStats(Instant at,String source) {
         int ai="ai".equals(source)?1:0,manual=ai==1?0:1;
         jdbc.update("INSERT INTO daily_schedule_stats(stat_date,schedules_created,schedules_created_ai,schedules_created_manual) "
-                        + "VALUES(?,1,?,?) AS new ON DUPLICATE KEY UPDATE schedules_created=schedules_created+1, "
-                        + "schedules_created_ai=schedules_created_ai+new.schedules_created_ai, "
-                        + "schedules_created_manual=schedules_created_manual+new.schedules_created_manual",
+                        + "VALUES(?,1,?,?) AS new ON DUPLICATE KEY UPDATE schedules_created=daily_schedule_stats.schedules_created+1, "
+                        + "schedules_created_ai=daily_schedule_stats.schedules_created_ai+new.schedules_created_ai, "
+                        + "schedules_created_manual=daily_schedule_stats.schedules_created_manual+new.schedules_created_manual",
                 toUtcDate(at),ai,manual);
     }
     private void incrementStat(Instant at,String col,int amount) {
