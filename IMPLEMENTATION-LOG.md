@@ -11,6 +11,7 @@
 - 이번 CI 회귀 검토에서 lifecycle로 취소된 동일 `remind_at` 행을 그대로 재사용하던 결함을 찾았다. 취소/보류/리마인더 제거/일정 삭제 표식을 `last_error`에 구분해 남기고, 같은 설정이 다시 활성화될 때 새 `dispatch_id`와 pending 상태로 시작하도록 고쳤다. 일반 notify `skipped`나 이미 지난 알림 결과를 제목 변경만으로 다시 열지는 않는다. 기존 통합 테스트에 cancel→confirm 세대 ID 변경 단언을 추가했다.
 - tentative 첫 이벤트에서 projection은 생성하지 않고 바로 반환해 기존 integration assertion이 행을 조회하다 `EmptyResult`를 냈다. tentative reminders를 skipped projection으로 저장한 뒤 confirmed 전환 시 새 generation으로 다시 여는 방식으로 수정했다. scan에서 30분 grace 만료도 `grace_expired` reason code로 남긴다.
 - 배포 로그로는 기존 integration 7/17 실패의 원인을 확정할 수 없었다. 이전 bootstrap은 실패 원인을 예외 종류만 남겨 숨겼으므로, NATS stream/consumer bootstrap 실패 시 예외 stack을 남겨 다음 CI에서 실제 server/consumer 오류를 확인할 수 있게 했다. 통합 테스트 시간 초과를 늘리거나 건너뛰지 않았다.
+- CI run `40834284313` artifact/XML 확인 결과 integration 17개 전부가 테스트 로직 진입 전에 동일하게 실패했다. Spring이 `ReminderScanJob`의 운영 5-인자 생성자와 테스트 3-인자 생성자 중 주입 대상을 고르지 못해 `No default constructor found`를 냈다. 운영 생성자에 `@Autowired`를 추가해 원인을 수정했다. 따라서 이 run은 NATS consumer/DLQ 실행 결과를 검증하지 못한다.
 - Core/notify 계약 대조: due는 `app.reminders.due.v1`이며 `dispatch_id`, `attempt`, `user_id`, `schedule_id`, `title`, `start_at`, `remind_at`, `minutes_before`, `channel`, `timezone`, `all_day`, `start_date`, `end_date`, `schedule_revision`을 담는다. Core validity는 schedule/user/revision/minutes/channel/remind_at을 받으며, batch validity는 dispatch ID와 attempt로 현재 generation 및 활성 계정을 재확인한다. 이메일/설명 원문/주소는 이벤트에 넣지 않는다. 30분 grace와 최대 3회(+1m/+5m) 정책을 유지한다.
 
 ## 요구사항 연계 및 남은 작업

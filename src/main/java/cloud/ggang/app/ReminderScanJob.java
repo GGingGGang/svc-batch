@@ -11,6 +11,7 @@ import java.util.List;
 import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -28,6 +29,7 @@ public class ReminderScanJob {
     private final NatsConnectionHolder nats;
     private final ObjectMapper mapper;
 
+    @Autowired
     public ReminderScanJob(JdbcTemplate jdbc, MeterRegistry meters,
             PlatformTransactionManager manager, NatsConnectionHolder nats, ObjectMapper mapper) {
         this.jdbc = jdbc;
