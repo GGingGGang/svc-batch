@@ -89,7 +89,9 @@ public class NatsStreamBootstrap {
             resultConsumer = null;
             deletionConsumer = null;
             started.set(false);
-            log.error("nats stream/consumer bootstrap failed error={}", ex.getClass().getSimpleName());
+            // Keep the underlying server/consumer cause visible: retryBootstrap retries this path,
+            // and hiding the cause turns all downstream consumer tests into opaque timeouts.
+            log.error("nats stream/consumer bootstrap failed", ex);
         }
     }
 

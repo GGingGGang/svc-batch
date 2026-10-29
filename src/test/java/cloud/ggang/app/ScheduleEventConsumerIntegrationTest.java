@@ -195,6 +195,7 @@ class ScheduleEventConsumerIntegrationTest {
         reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
                 "meeting", startAt, null, false, "manual", "confirmed", 1L, reminders, now));
         assertThat(reminderStatus(scheduleId)).isEqualTo("pending");
+        byte[] originalDispatchId = reminderDispatchId(scheduleId);
 
         reconcileService.upsert(new ScheduleEventPayload(scheduleId.toString(), userId.toString(),
                 "meeting", startAt, null, false, "manual", "cancelled", 2L, reminders, now));
@@ -207,6 +208,7 @@ class ScheduleEventConsumerIntegrationTest {
                 "meeting", startAt, null, false, "manual", "confirmed", 3L, reminders, now));
         assertThat(reminderCount(scheduleId)).isEqualTo(1);
         assertThat(reminderStatus(scheduleId)).isEqualTo("pending");
+        assertThat(reminderDispatchId(scheduleId)).isNotEqualTo(originalDispatchId);
 
         jdbcTemplate.update("UPDATE reminder_dispatch SET attempt_count = 2, last_error = 'old' "
                 + "WHERE schedule_id = ?", toBytes(scheduleId));
@@ -604,6 +606,11 @@ class ScheduleEventConsumerIntegrationTest {
                         Integer.class,
                         toBytes(scheduleId));
         return count == null ? 0 : count;
+    }
+
+    private byte[] reminderDispatchId(UUID scheduleId) {
+        return jdbcTemplate.queryForObject("SELECT id FROM reminder_dispatch WHERE schedule_id = ?",
+                byte[].class, toBytes(scheduleId));
     }
 
     private String reminderTitle(UUID scheduleId) {

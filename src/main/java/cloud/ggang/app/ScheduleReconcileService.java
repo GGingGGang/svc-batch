@@ -48,7 +48,15 @@ public class ScheduleReconcileService {
         jdbc.update("UPDATE schedule_event_state SET last_event_at = ?, last_revision = ? WHERE schedule_id=?",
                 toLocalDateTime(occurredAt),payload.revision(),scheduleId);
         if ("cancelled".equals(payload.status()) || "tentative".equals(payload.status())) {
-            int skipped=jdbc.update("UPDATE reminder_dispatch SET status = 'skipped' WHERE schedule_id=? "
+            if ("tentative".equals(payload.status())) {
+                Instant startAt = reminderStartAt(payload);
+                for (ReminderPayload reminder : payload.reminders()) {
+                    if ("none".equals(reminder.channel())) continue;
+                    validateReminder(reminder, payload.reminders());
+                    upsertReminder(scheduleId, userId, payload, startAt, reminder, occurredAt);
+                }
+            }
+            int skipped=jdbc.update("UPDATE reminder_dispatch SET status = 'skipped',last_error='schedule_inactive' WHERE schedule_id=? "
                     + "AND status IN ('pending','dispatching')",scheduleId);
             if (skipped>0) incrementStat(occurredAt,"reminders_skipped",skipped);
             return;
@@ -66,7 +74,7 @@ public class ScheduleReconcileService {
                 (rs,n)->new ReminderKey(rs.getInt(1),rs.getString(2)),scheduleId);
         int skipped=0;
         for (ReminderKey key:old) if (!desired.contains(key.minutesBefore()+":"+key.channel()))
-            skipped+=jdbc.update("UPDATE reminder_dispatch SET status='skipped' WHERE schedule_id=? AND minutes_before=? "
+            skipped+=jdbc.update("UPDATE reminder_dispatch SET status='skipped',last_error='reminder_removed' WHERE schedule_id=? AND minutes_before=? "
                     + "AND channel=? AND status IN ('pending','dispatching')",scheduleId,key.minutesBefore(),key.channel());
         if (skipped>0) incrementStat(occurredAt,"reminders_skipped",skipped);
     }
@@ -90,7 +98,7 @@ public class ScheduleReconcileService {
                     toLocalDateTime(occurredAt),payload.revision(),scheduleId);
         }
         if (newlyDeleted) incrementStat(occurredAt,"schedules_deleted",1);
-        int skipped=jdbc.update("UPDATE reminder_dispatch SET status = 'skipped' WHERE schedule_id=? "
+        int skipped=jdbc.update("UPDATE reminder_dispatch SET status = 'skipped',last_error='schedule_deleted' WHERE schedule_id=? "
                 + "AND status IN ('pending','dispatching')",scheduleId);
         if (skipped>0) incrementStat(occurredAt,"reminders_skipped",skipped);
     }
@@ -99,11 +107,13 @@ public class ScheduleReconcileService {
             ReminderPayload reminder,Instant occurredAt) {
         Instant remindAt=startAt.minus(reminder.minutesBefore(),ChronoUnit.MINUTES);
         LocalDateTime remindValue=toLocalDateTime(remindAt);
-        List<Snapshot> previous=jdbc.query("SELECT id,status,remind_at,schedule_revision FROM reminder_dispatch "
+        List<Snapshot> previous=jdbc.query("SELECT id,status,remind_at,schedule_revision,last_error FROM reminder_dispatch "
                         + "WHERE schedule_id=? AND minutes_before=? AND channel=? FOR UPDATE",
                 (rs,n)->new Snapshot(rs.getBytes("id"),rs.getString("status"),rs.getTimestamp("remind_at").toInstant(),
-                        rs.getObject("schedule_revision",Long.class)),scheduleId,reminder.minutesBefore(),reminder.channel());
-        boolean same=!previous.isEmpty() && previous.get(0).remindAt().equals(remindAt);
+                        rs.getObject("schedule_revision",Long.class),rs.getString("last_error")),scheduleId,reminder.minutesBefore(),reminder.channel());
+        boolean lifecycleSkipped=!previous.isEmpty() && "skipped".equals(previous.get(0).status())
+                && List.of("schedule_inactive","reminder_removed","schedule_deleted").contains(previous.get(0).lastError());
+        boolean same=!previous.isEmpty() && previous.get(0).remindAt().equals(remindAt) && !lifecycleSkipped;
         byte[] id=same?previous.get(0).id():UuidBytes.toBytes(Uuid7Generator.generate());
         String status=same?previous.get(0).status():(remindAt.isAfter(Instant.now())?"pending":"skipped");
         if(previous.isEmpty()) {
@@ -176,6 +186,6 @@ public class ScheduleReconcileService {
     private static LocalDateTime toLocalDateTime(Instant value) { return LocalDateTime.ofInstant(value,ZoneOffset.UTC); }
     private static LocalDate toUtcDate(Instant value) { return value.atZone(ZoneOffset.UTC).toLocalDate(); }
     private record EventState(Instant lastEventAt,Long revision,boolean deleted) {}
-    private record Snapshot(byte[] id,String status,Instant remindAt,Long revision) {}
+    private record Snapshot(byte[] id,String status,Instant remindAt,Long revision,String lastError) {}
     private record ReminderKey(int minutesBefore,String channel) {}
 }

@@ -86,7 +86,8 @@ public class ReminderScanJob {
                             rs.getDate("end_date") == null ? null : rs.getDate("end_date").toLocalDate(),
                             rs.getObject("schedule_revision", Long.class), rs.getInt("attempt_count")), id);
             if (Instant.now().isAfter(row.remindAt().plusSeconds(30 * 60L))) {
-                jdbc.update("UPDATE reminder_dispatch SET status='skipped' WHERE id=? AND status='pending'", id);
+                jdbc.update("UPDATE reminder_dispatch SET status='skipped',last_error='grace_expired' "
+                        + "WHERE id=? AND status='pending'", id);
                 incrementStat(LocalDate.now(ZoneOffset.UTC), "reminders_skipped", 1);
                 continue;
             }
