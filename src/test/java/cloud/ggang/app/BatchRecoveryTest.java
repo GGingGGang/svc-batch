@@ -93,7 +93,8 @@ class BatchRecoveryTest {
         reconcile.upsert(new ScheduleEventPayload(scheduleId, userId, "old", now.plusSeconds(3600),
                 null, false, "manual", "confirmed", 1L, List.of(), now), false);
         assertThat(org.mockito.Mockito.mockingDetails(jdbc).getInvocations())
-                .noneMatch(call -> call.getMethod().getName().equals("update"));
+                .noneMatch(call -> call.getMethod().getName().equals("update")
+                        && call.getArgument(0).toString().startsWith("UPDATE schedule_event_state"));
 
         reconcile.upsert(new ScheduleEventPayload(scheduleId, userId, "new", now.plusSeconds(3600),
                 null, false, "manual", "confirmed", 3L, List.of(), now), false);

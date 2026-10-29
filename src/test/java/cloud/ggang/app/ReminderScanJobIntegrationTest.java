@@ -78,18 +78,18 @@ class ReminderScanJobIntegrationTest {
     }
 
     @Test
-    void dueReminderWithinGraceIsSkippedWithoutSentStats() {
+    void dueReminderWithinGraceIsQueuedForDispatch() {
         byte[] id = insertDueReminder(UUID.randomUUID(), UUID.randomUUID(), "5분 지난 리마인더", "-5");
 
         int processed = reminderScanJob.scanOnce();
 
         assertThat(processed).isEqualTo(1);
-        assertThat(statusOf(id)).isEqualTo("skipped");
+        assertThat(statusOf(id)).isEqualTo("dispatching");
         assertThat(sentAtOf(id)).isNull();
-        assertThat(todayStat("reminders_skipped")).isEqualTo(1);
+        assertThat(todayStat("reminders_skipped")).isZero();
         assertThat(todayStat("reminders_sent")).isZero();
         assertThat(reminderScanJob.scanOnce()).isZero();
-        assertThat(todayStat("reminders_skipped")).isEqualTo(1);
+        assertThat(todayStat("reminders_skipped")).isZero();
     }
 
     @Test
@@ -130,7 +130,7 @@ class ReminderScanJobIntegrationTest {
             int processed = reminderScanJob.scanOnce();
 
             assertThat(processed).isEqualTo(1);
-            assertThat(statusOf(freeId)).isEqualTo("skipped");
+            assertThat(statusOf(freeId)).isEqualTo("dispatching");
             assertThat(statusOf(lockedId)).isEqualTo("pending");
 
             holder.rollback();
@@ -138,7 +138,7 @@ class ReminderScanJobIntegrationTest {
 
         int processedAfterRelease = reminderScanJob.scanOnce();
         assertThat(processedAfterRelease).isEqualTo(1);
-        assertThat(statusOf(lockedId)).isEqualTo("skipped");
+        assertThat(statusOf(lockedId)).isEqualTo("dispatching");
     }
 
     @Test
@@ -163,7 +163,7 @@ class ReminderScanJobIntegrationTest {
         heldByOtherReplica.get().unlock();
 
         reminderScanJob.scan();
-        assertThat(statusOf(id)).isEqualTo("skipped");
+        assertThat(statusOf(id)).isEqualTo("dispatching");
     }
 
     private byte[] insertDueReminder(UUID scheduleId, UUID userId, String title, String minutesOffset) {

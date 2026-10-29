@@ -1,22 +1,25 @@
 # svc-batch 구현 기록
 
-## 이번 변경
+## 구현 범위
 
-- `REM-008`: tentative 상태 일정의 pending 리마인더를 `skipped` 처리하고 skipped 통계에 반영한다. confirmed 이벤트가 오면 미래 예정 알림을 다시 활성화한다. 실제 외부 발송은 계속 비활성이다.
-- `graphify-out/MSA-AUDIT.md` #4 (P1): consumer가 NATS `created`/`updated` subject를 reconcile 내부에 전달한다. `schedule_event_state.creation_accounted` 마커와 `created` subject를 사용해 projection stale/deleted 가드와 생성 사실 통계를 분리했다. deleted-first 뒤 created도 통계만 한 번 기록하고 tombstone은 유지한다. 준비 검사는 새 컬럼도 확인한다.
-- V4 migration은 기존 state를 `DEFAULT 1`로 legacy-accounted 처리하고 새 state insert는 0으로 시작한다. 과거 오집계의 원인을 복원할 정보가 없으므로 기존 일별 통계를 재계산하거나 교정하지 않는다.
-- 통합 테스트에 tentative → confirmed와 created→updated, updated(day 2)→created(day 1), deleted→created, 중복 created, migration 기존 행 보존 시나리오를 추가했다. NATS 통합 경로의 subject 전달도 검증하도록 했다.
+- REM-004/005/006/007/008/009/011/012: 과거 새 알림은 생성 시 건너뛰고, 기존 알림은 예정 시각 후 30분까지만 재개한다. 설정 5개 이하와 채널·분 단위 값을 검증한다. 일정 시간이 바뀌어 `remind_at` 세대가 바뀌면 새 `dispatch_id`를 만들고, 제목만 바뀌어 예정 시각이 같으면 기존 성공 상태를 유지해 중복 발송하지 않는다. 취소·삭제·리마인더 제거는 pending/dispatching 작업을 취소한다. 종일 일정은 IANA 시간대의 시작 날짜 09:00을 알림 기준으로 계산한다.
+- REM-003/NTF-003~007/POL-23: 배치가 APP_REMINDERS JetStream durable due/result 흐름을 소유한다. due 이벤트에 민감한 설명/원문/주소를 넣지 않는다. `reminder_attempt` outbox가 `(dispatch_id, attempt)`를 저장하고 JetStream PubAck 뒤 게시 완료를 기록한다. 최대 3회, 1분/5분 대기 재시도만 허용하고, `unknown`은 자동 재전송하지 않는다. notify가 채널 동의·제공자 응답·실제 접수를 관리하며 provider 설정은 기본 비활성이다.
+- REM-007/OPS-005: notify용 batch 내부 preflight `GET /internal/reminders/{dispatchId}/validity?attempt=N`를 추가했다. 공유 `INTERNAL_SERVICE_TOKEN`을 상수시간 비교하고, 현재 dispatch generation/attempt와 schedule/account tombstone 상태를 확인한다. false 응답은 상세 데이터 없이 반환한다. Core authoritative validity를 함께 확인하는 흐름은 notify와 합의했다.
+- REL-015/계정 삭제: `ACCOUNT_LIFECYCLE` durable consumer가 user의 알림·시도·projection을 지우고 익명 해시 tombstone을 남긴 뒤 결과를 발행한다. `account_lifecycle_guard` 행 잠금으로 삭제와 지연 schedule event가 경쟁해 데이터를 재생성하지 못하게 한다. 기존 사용자용 guard는 V6에서 초기화한다. 글로벌 익명 통계는 사용자 식별 정보가 없어 보존한다.
+- OPS-004/005/006: `/internal/ops/reminders`는 실패/unknown 작업의 비민감 필드만 조회한다. 재처리는 이유, 고정 설정 actor/token, 현재 Core/Auth 유효성, 30분 기한을 요구하고 audit에 actor/action/reason/result를 남긴다. secret 미설정이면 503으로 닫힌다. 계정 정지/해제는 auth 소유 API다.
+- V5는 reminder delivery/attempt/outbox/account/audit schema를 추가한다. V6는 계정 삭제와 schedule event 재생성 경쟁을 차단하는 guard를 추가한다. V4의 creation marker와 레거시 집계 원칙은 유지한다. 과거 잘못된 created 통계는 이벤트 원인이 보존되지 않아 자동 보정하지 않는다.
 
-## 확인하지 못한 항목
+## 요구사항 연계 및 남은 작업
 
-- **정확한 과거 생성 통계 복구:** 새 이벤트부터 created subject의 `occurred_at` 기준으로 집계한다. 이미 누적된 날짜별 수치는 과거 이벤트 원인과 원 생성일을 알 수 없어 보정하지 않았다.
-- **리마인더 외부 발송 재시도 (`REM-003`, `REM-007`, `REM-009`, `POL-23`):** 현재 발송 연결 자체가 비활성이라 채널 동의 확인, 발송 직전 최신 상태 확인, 외부 실패 최대 3회 재시도는 구현할 실행 경로가 없다. 실제 전송을 성공으로 가장하지 않았다.
-- **재처리 운영도구 (`OPS-005/006`):** DLQ 실패 보존과 durable 재시작은 이미 구현되어 있지만 권한·감사기록이 있는 선택 재처리/백필 도구는 별도 운영 계약이 필요하다. 이번 변경에서 추가하지 않았다.
+- Batch 소유 구현: REM-004/005/006/007/008/009/011/012, POL-22/23, REL-015 삭제 후처리, OPS-004/005/006 재처리 경로.
+- notify/core 연계가 있어야 완성: REM-003, NTF-003/005/006/007, schedule/user 최신상태 검증. Core·notify 구현 후 서비스 간 계약을 실제로 붙여야 한다. SMTP/Telegram 자격증명이 없어 실제 발송은 비활성으로 유지한다.
+- 다른 소유 영역: NTF-001/002/004/008/009/010은 notify/web의 목적지·동의·이력·테스트 알림·DND 기능이다. Batch는 수신 주소나 채널 자격증명을 저장하지 않는다.
+- 운영환경에서 확인할 것: `OPERATOR_TOKENS_JSON`, `INTERNAL_SERVICE_TOKEN`, `CORE_INTERNAL_URL`, `AUTH_ACCOUNT_STATUS_URL` 설정과 내부 네트워크 ACL, NATS stream 권한 및 consumer startup. 재처리 route는 모두 유효성 API 호출에 fail-closed다.
+- 복구 시험(백업 복원/장애 주입)은 실행하지 않았다. Docker가 없어 Testcontainers 통합 테스트도 실행하지 못했다. 사용자 과거 통계 보정은 하지 않는다.
 
 ## 검증
 
-- JDK `C:/Users/kgh_4/.tools/jdk-21.0.11+10` 및 Gradle `C:/Users/kgh_4/.tools/gradle-8.12`로 `test`, `checkstyleMain`, `checkstyleTest`, `spotlessCheck` 통과(유닛 15개).
-- 첫 검증에서 수정한 회귀: 기존 Mockito 테스트가 새 상태/마커 DB 갱신 수를 1회로 가정했으며, pending→skipped SQL을 직접 검증하도록 수정했다. 기존 OTel 테스트는 라이브러리 description 구분자를 `=`로 기대해 실패해 실제 `:` 형식으로 고쳤다.
-- `git diff --check` 통과.
-- Docker 실행 파일이 없어 Testcontainers 통합 테스트는 미실행이다.
-- 원격 호출·배포·commit·push는 하지 않았다.
+- JDK 21 `C:/Users/kgh_4/.tools/jdk-21.0.11+10`, Gradle 8.12 `C:/Users/kgh_4/.tools/gradle-8.12`.
+- `gradle test`: 로컬 단위 테스트 성공. Docker 기반 `integrationTest`는 미실행.
+- `.github/workflows/test.yml`에 항상 Gradle XML/HTML report를 업로드하도록 추가해 CI 통합 실패 자료를 보존한다.
+- 외부 발송, 배포, 원격 호출, commit/push는 하지 않았다.

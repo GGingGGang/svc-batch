@@ -40,6 +40,14 @@ spring:
 # 서버 미기동 상태로도 컨텍스트가 뜨도록 NatsConnectionHolder 가 Nats.connectAsynchronously 로 연결한다
 # (연결 성공 시점에 stream/durable consumer 를 기동 — svc-batch/PLAN.md §4 참고).
 app:
+  ops:
+    operator-tokens-json: ${OPERATOR_TOKENS_JSON:}
+  internal:
+    token: ${INTERNAL_SERVICE_TOKEN:}
+  core:
+    internal-url: ${CORE_INTERNAL_URL:}
+  auth:
+    account-status-url: ${AUTH_ACCOUNT_STATUS_URL:}
   nats:
     url: ${NATS_URL:nats://localhost:4222}
   # 리마인더 스캔 잡(ReminderScanJob) 주기. ShedLock(batch:lock:reminder-scan, Redis DB2)이 replica

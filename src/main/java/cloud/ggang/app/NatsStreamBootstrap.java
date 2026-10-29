@@ -29,12 +29,19 @@ public class NatsStreamBootstrap {
     private static final Logger log = LoggerFactory.getLogger(NatsStreamBootstrap.class);
 
     private final ScheduleEventConsumer handler;
+    private final ReminderResultConsumer reminderResults;
+    private final AccountDeletionConsumer accountDeletions;
     private final AtomicBoolean started = new AtomicBoolean(false);
 
     private volatile MessageConsumer messageConsumer;
+    private volatile MessageConsumer resultConsumer;
+    private volatile MessageConsumer deletionConsumer;
 
-    public NatsStreamBootstrap(ScheduleEventConsumer handler) {
+    public NatsStreamBootstrap(ScheduleEventConsumer handler, ReminderResultConsumer reminderResults,
+            AccountDeletionConsumer accountDeletions) {
         this.handler = handler;
+        this.reminderResults = reminderResults;
+        this.accountDeletions = accountDeletions;
     }
 
     public void bootstrap(Connection connection) {
@@ -44,6 +51,8 @@ public class NatsStreamBootstrap {
         try {
             JetStreamManagement jsm = connection.jetStreamManagement();
             createOrUpdateStream(jsm, dlqStreamConfig());
+            createOrUpdateStream(jsm, remindersStreamConfig());
+            createOrUpdateStream(jsm, accountLifecycleStreamConfig());
 
             StreamContext scheduleStream = connection.getStreamContext(NatsSubjects.STREAM_SCHEDULES);
             ConsumerConfiguration consumerConfig =
@@ -55,15 +64,37 @@ public class NatsStreamBootstrap {
             ConsumerContext consumerContext = scheduleStream.createOrUpdateConsumer(consumerConfig);
 
             messageConsumer = consumerContext.consume(handler);
+            StreamContext reminders = connection.getStreamContext(NatsSubjects.STREAM_REMINDERS);
+            ConsumerConfiguration resultConfig = ConsumerConfiguration.builder()
+                    .durable(NatsSubjects.CONSUMER_REMINDER_RESULTS)
+                    .filterSubject(NatsSubjects.REMINDER_RESULT)
+                    .ackPolicy(AckPolicy.Explicit)
+                    .ackWait(Duration.ofSeconds(30))
+                    .build();
+            resultConsumer = reminders.createOrUpdateConsumer(resultConfig).consume(reminderResults);
+            StreamContext accounts = connection.getStreamContext(NatsSubjects.STREAM_ACCOUNT_LIFECYCLE);
+            ConsumerConfiguration deletionConfig = ConsumerConfiguration.builder()
+                    .durable(NatsSubjects.CONSUMER_ACCOUNT_DELETIONS)
+                    .filterSubject(NatsSubjects.ACCOUNT_DELETION_REQUESTED)
+                    .ackPolicy(AckPolicy.Explicit)
+                    .ackWait(Duration.ofSeconds(30))
+                    .build();
+            deletionConsumer = accounts.createOrUpdateConsumer(deletionConfig).consume(accountDeletions);
             log.info("nats consumer started durable={}", NatsSubjects.CONSUMER_NAME);
         } catch (Exception ex) {
+            closeConsumer(messageConsumer);
+            closeConsumer(resultConsumer);
+            closeConsumer(deletionConsumer);
+            messageConsumer = null;
+            resultConsumer = null;
+            deletionConsumer = null;
             started.set(false);
             log.error("nats stream/consumer bootstrap failed error={}", ex.getClass().getSimpleName());
         }
     }
 
     public boolean isStarted() {
-        return started.get() && messageConsumer != null;
+        return started.get() && messageConsumer != null && resultConsumer != null && deletionConsumer != null;
     }
 
     @PreDestroy
@@ -71,6 +102,14 @@ public class NatsStreamBootstrap {
         if (messageConsumer != null) {
             messageConsumer.close();
             messageConsumer = null;
+        }
+        if (resultConsumer != null) {
+            resultConsumer.close();
+            resultConsumer = null;
+        }
+        if (deletionConsumer != null) {
+            deletionConsumer.close();
+            deletionConsumer = null;
         }
         started.set(false);
     }
@@ -97,5 +136,36 @@ public class NatsStreamBootstrap {
                 .maxBytes(512L * 1024 * 1024)
                 .discardPolicy(DiscardPolicy.Old)
                 .build();
+    }
+
+    private StreamConfiguration remindersStreamConfig() {
+        return StreamConfiguration.builder()
+                .name(NatsSubjects.STREAM_REMINDERS)
+                .subjects(NatsSubjects.REMINDER_DUE, NatsSubjects.REMINDER_RESULT)
+                .storageType(StorageType.File)
+                .maxAge(Duration.ofDays(30))
+                .maxBytes(512L * 1024 * 1024)
+                .discardPolicy(DiscardPolicy.Old)
+                .build();
+    }
+
+    private StreamConfiguration accountLifecycleStreamConfig() {
+        return StreamConfiguration.builder()
+                .name(NatsSubjects.STREAM_ACCOUNT_LIFECYCLE)
+                .subjects("app.account.>")
+                .storageType(StorageType.File)
+                .maxAge(Duration.ofDays(30))
+                .maxBytes(512L * 1024 * 1024)
+                .discardPolicy(DiscardPolicy.Old)
+                .build();
+    }
+
+    private void closeConsumer(MessageConsumer consumer) {
+        if (consumer == null) return;
+        try {
+            consumer.close();
+        } catch (Exception ignored) {
+            log.debug("nats consumer close failed during bootstrap cleanup");
+        }
     }
 }

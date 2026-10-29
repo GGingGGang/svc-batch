@@ -37,11 +37,15 @@ public class HealthController {
                     + "creation_accounted "
                     + "FROM schedule_event_state LIMIT 0");
             jdbcTemplate.execute("SELECT id, schedule_id, user_id, title, minutes_before, channel, "
-                    + "start_at, remind_at, status, attempt_count, last_error, sent_at "
+                    + "start_at, remind_at, status, attempt_count, last_error, sent_at, timezone, all_day, "
+                    + "start_date, end_date, schedule_revision, next_attempt_at "
                     + "FROM reminder_dispatch LIMIT 0");
             jdbcTemplate.execute("SELECT stat_date, schedules_created, schedules_created_ai, "
                     + "schedules_created_manual, schedules_deleted, reminders_sent, reminders_skipped, "
-                    + "reminders_failed FROM daily_schedule_stats LIMIT 0");
+                    + "reminders_failed, reminders_unknown FROM daily_schedule_stats LIMIT 0");
+            jdbcTemplate.execute("SELECT dispatch_id,attempt,status,payload,result_at FROM reminder_attempt LIMIT 0");
+            jdbcTemplate.execute("SELECT user_hash,event_id FROM deleted_account_tombstone LIMIT 0");
+            jdbcTemplate.execute("SELECT user_hash,is_deleted FROM account_lifecycle_guard LIMIT 0");
         });
         boolean redis = available(() -> {
             try (var connection = redisConnectionFactory.getConnection()) {

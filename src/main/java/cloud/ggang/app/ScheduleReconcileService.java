@@ -3,255 +3,179 @@ package cloud.ggang.app;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-// consumer reconcile 알고리즘 — 전체문서 PLAN.md §6.5, svc-batch/PLAN.md §4 그대로.
-// 이벤트당 1 트랜잭션. schedule_event_state FOR UPDATE 가드로 at-least-once 중복/역순 도착을 방어한다.
 @Service
 public class ScheduleReconcileService {
+    private final JdbcTemplate jdbc;
 
-    private static final String REMINDER_UPSERT_SQL =
-            "INSERT INTO reminder_dispatch "
-                    + "(id, schedule_id, user_id, title, minutes_before, channel, start_at, remind_at, status) "
-                    + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
-                    + "IF(? > UTC_TIMESTAMP(3), 'pending', 'skipped')) AS new "
-                    + "ON DUPLICATE KEY UPDATE "
-                    + "title = new.title, "
-                    + "start_at = new.start_at, "
-                    + "attempt_count = IF(new.remind_at = reminder_dispatch.remind_at "
-                    + "AND reminder_dispatch.status <> 'skipped', "
-                    + "reminder_dispatch.attempt_count, 0), "
-                    + "last_error = IF(new.remind_at = reminder_dispatch.remind_at "
-                    + "AND reminder_dispatch.status <> 'skipped', "
-                    + "reminder_dispatch.last_error, NULL), "
-                    + "sent_at = IF(new.remind_at = reminder_dispatch.remind_at "
-                    + "AND reminder_dispatch.status <> 'skipped', reminder_dispatch.sent_at, NULL), "
-                    + "status = IF(new.remind_at = reminder_dispatch.remind_at "
-                    + "AND reminder_dispatch.status <> 'skipped', "
-                    + "reminder_dispatch.status, "
-                    + "IF(new.remind_at > UTC_TIMESTAMP(3), 'pending', 'skipped')), "
-                    + "remind_at = new.remind_at";
-
-    private final JdbcTemplate jdbcTemplate;
-
-    public ScheduleReconcileService(JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = jdbcTemplate;
-    }
+    public ScheduleReconcileService(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
     @Transactional
-    public void upsert(ScheduleEventPayload payload) {
-        upsert(payload, true);
-    }
+    public void upsert(ScheduleEventPayload payload) { upsert(payload, true); }
 
     @Transactional
     public void upsert(ScheduleEventPayload payload, boolean createdEvent) {
-        if (!"manual".equals(payload.source()) && !"ai".equals(payload.source())) {
+        if (!"manual".equals(payload.source()) && !"ai".equals(payload.source()))
             throw new IllegalArgumentException("invalid schedule source");
-        }
-        if (payload.status() != null && !List.of("confirmed", "tentative", "cancelled").contains(payload.status())) {
+        if (payload.status() != null && !List.of("confirmed", "tentative", "cancelled").contains(payload.status()))
             throw new IllegalArgumentException("invalid schedule status");
-        }
+        if (payload.reminders().size() > 5) throw new IllegalArgumentException("too many reminders");
         byte[] scheduleId = UuidBytes.toBytes(UUID.fromString(payload.scheduleId()));
         byte[] userId = UuidBytes.toBytes(UUID.fromString(payload.userId()));
+        if (isDeletedAccount(userId)) return;
         Instant occurredAt = payload.occurredAt();
-
-        EventState existing = selectStateForUpdate(scheduleId);
-        boolean newlyObserved = existing == null;
-        if (existing == null) {
-            jdbcTemplate.update(
-                    "INSERT INTO schedule_event_state "
-                            + "(schedule_id, user_id, last_event_at, last_revision, is_deleted, creation_accounted) "
-                            + "VALUES (?, ?, ?, ?, 0, 0)",
-                    scheduleId,
-                    userId,
-                    toLocalDateTime(occurredAt),
-                    payload.revision());
-            existing = new EventState(occurredAt, payload.revision(), false);
+        EventState state = selectStateForUpdate(scheduleId);
+        boolean first = state == null;
+        if (first) {
+            jdbc.update("INSERT INTO schedule_event_state(schedule_id,user_id,last_event_at,last_revision,is_deleted,creation_accounted) "
+                            + "VALUES(?,?,?,?,0,0)", scheduleId,userId,toLocalDateTime(occurredAt),payload.revision());
+            state = new EventState(occurredAt,payload.revision(),false);
         }
-        if (createdEvent && accountCreation(scheduleId)) {
-            incrementCreatedStats(occurredAt, payload.source());
-        }
-        if (existing.deleted() || (!newlyObserved && isStale(existing, payload.revision(), occurredAt))) {
-            // 이미 처리됐거나 더 최신 이벤트면 no-op — 변경 없이 커밋.
-            return;
-        }
-
-        jdbcTemplate.update(
-                "UPDATE schedule_event_state SET last_event_at = ?, last_revision = ? WHERE schedule_id = ?",
-                toLocalDateTime(occurredAt),
-                payload.revision(),
-                scheduleId);
-
+        if (createdEvent && jdbc.update("UPDATE schedule_event_state SET creation_accounted=1 "
+                + "WHERE schedule_id=? AND creation_accounted=0", scheduleId) == 1)
+            incrementCreatedStats(occurredAt,payload.source());
+        if (state.deleted() || (!first && isStale(state,payload.revision(),occurredAt))) return;
+        jdbc.update("UPDATE schedule_event_state SET last_event_at = ?, last_revision = ? WHERE schedule_id=?",
+                toLocalDateTime(occurredAt),payload.revision(),scheduleId);
         if ("cancelled".equals(payload.status()) || "tentative".equals(payload.status())) {
-            int skipped = jdbcTemplate.update(
-                    "UPDATE reminder_dispatch SET status = 'skipped' "
-                            + "WHERE schedule_id = ? AND status = 'pending'", scheduleId);
-            if (skipped > 0) {
-                incrementStat(occurredAt, "reminders_skipped", skipped);
-            }
+            int skipped=jdbc.update("UPDATE reminder_dispatch SET status = 'skipped' WHERE schedule_id=? "
+                    + "AND status IN ('pending','dispatching')",scheduleId);
+            if (skipped>0) incrementStat(occurredAt,"reminders_skipped",skipped);
             return;
         }
-
-        // 구 pending 리마인더 정리 (sent/failed/skipped 이력은 보존).
-        jdbcTemplate.update(
-                "DELETE FROM reminder_dispatch WHERE schedule_id = ? AND status = 'pending'", scheduleId);
-
-        for (ReminderPayload reminder : payload.reminders()) {
-            if ("none".equals(reminder.channel())) {
-                continue;
-            }
-            upsertReminder(scheduleId, userId, payload.title(), payload.startAt(), reminder, occurredAt);
+        Set<String> desired=new HashSet<>();
+        for (ReminderPayload reminder:payload.reminders()) {
+            if ("none".equals(reminder.channel())) continue;
+            validateReminder(reminder,payload.reminders());
+            Instant startAt=reminderStartAt(payload);
+            desired.add(reminder.minutesBefore()+":"+reminder.channel());
+            upsertReminder(scheduleId,userId,payload,startAt,reminder,occurredAt);
         }
+        List<ReminderKey> old=jdbc.query("SELECT minutes_before,channel FROM reminder_dispatch WHERE schedule_id=? "
+                        + "AND status IN ('pending','dispatching') FOR UPDATE",
+                (rs,n)->new ReminderKey(rs.getInt(1),rs.getString(2)),scheduleId);
+        int skipped=0;
+        for (ReminderKey key:old) if (!desired.contains(key.minutesBefore()+":"+key.channel()))
+            skipped+=jdbc.update("UPDATE reminder_dispatch SET status='skipped' WHERE schedule_id=? AND minutes_before=? "
+                    + "AND channel=? AND status IN ('pending','dispatching')",scheduleId,key.minutesBefore(),key.channel());
+        if (skipped>0) incrementStat(occurredAt,"reminders_skipped",skipped);
     }
 
     @Transactional
     public void delete(ScheduleDeletedPayload payload) {
-        byte[] scheduleId = UuidBytes.toBytes(UUID.fromString(payload.scheduleId()));
-        byte[] userId = UuidBytes.toBytes(UUID.fromString(payload.userId()));
-        Instant occurredAt = payload.occurredAt();
-
-        EventState existing = selectStateForUpdate(scheduleId);
+        byte[] scheduleId=UuidBytes.toBytes(UUID.fromString(payload.scheduleId()));
+        byte[] userId=UuidBytes.toBytes(UUID.fromString(payload.userId()));
+        if (isDeletedAccount(userId)) return;
+        Instant occurredAt=payload.occurredAt();
+        EventState state=selectStateForUpdate(scheduleId);
         boolean newlyDeleted;
-        if (existing == null) {
-            jdbcTemplate.update(
-                    "INSERT INTO schedule_event_state "
-                            + "(schedule_id, user_id, last_event_at, last_revision, is_deleted, creation_accounted) "
-                            + "VALUES (?, ?, ?, ?, 1, 0)",
-                    scheduleId,
-                    userId,
-                    toLocalDateTime(occurredAt),
-                    payload.revision());
-            newlyDeleted = true;
+        if (state==null) {
+            jdbc.update("INSERT INTO schedule_event_state(schedule_id,user_id,last_event_at,last_revision,is_deleted,creation_accounted) "
+                    + "VALUES(?,?,?,?,1,0)",scheduleId,userId,toLocalDateTime(occurredAt),payload.revision());
+            newlyDeleted=true;
         } else {
-            newlyDeleted = !existing.deleted();
-            jdbcTemplate.update(
-                    "UPDATE schedule_event_state SET is_deleted = 1, "
-                            + "last_event_at = GREATEST(last_event_at, ?), "
-                            + "last_revision = COALESCE(?, last_revision) WHERE schedule_id = ?",
-                    toLocalDateTime(occurredAt),
-                    payload.revision(),
-                    scheduleId);
+            newlyDeleted=!state.deleted();
+            jdbc.update("UPDATE schedule_event_state SET is_deleted=1,last_event_at=GREATEST(last_event_at,?), "
+                    + "last_revision=COALESCE(?,last_revision) WHERE schedule_id=?",
+                    toLocalDateTime(occurredAt),payload.revision(),scheduleId);
         }
+        if (newlyDeleted) incrementStat(occurredAt,"schedules_deleted",1);
+        int skipped=jdbc.update("UPDATE reminder_dispatch SET status = 'skipped' WHERE schedule_id=? "
+                + "AND status IN ('pending','dispatching')",scheduleId);
+        if (skipped>0) incrementStat(occurredAt,"reminders_skipped",skipped);
+    }
 
-        if (newlyDeleted) {
-            incrementStat(occurredAt, "schedules_deleted", 1);
+    private void upsertReminder(byte[] scheduleId,byte[] userId,ScheduleEventPayload payload,Instant startAt,
+            ReminderPayload reminder,Instant occurredAt) {
+        Instant remindAt=startAt.minus(reminder.minutesBefore(),ChronoUnit.MINUTES);
+        LocalDateTime remindValue=toLocalDateTime(remindAt);
+        List<Snapshot> previous=jdbc.query("SELECT id,status,remind_at,schedule_revision FROM reminder_dispatch "
+                        + "WHERE schedule_id=? AND minutes_before=? AND channel=? FOR UPDATE",
+                (rs,n)->new Snapshot(rs.getBytes("id"),rs.getString("status"),rs.getTimestamp("remind_at").toInstant(),
+                        rs.getObject("schedule_revision",Long.class)),scheduleId,reminder.minutesBefore(),reminder.channel());
+        boolean same=!previous.isEmpty() && previous.get(0).remindAt().equals(remindAt);
+        byte[] id=same?previous.get(0).id():UuidBytes.toBytes(Uuid7Generator.generate());
+        String status=same?previous.get(0).status():(remindAt.isAfter(Instant.now())?"pending":"skipped");
+        if(previous.isEmpty()) {
+            jdbc.update("INSERT INTO reminder_dispatch(id,schedule_id,user_id,title,minutes_before,channel,start_at,remind_at,status,"
+                            + "timezone,all_day,start_date,end_date,schedule_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    id,scheduleId,userId,payload.title(),reminder.minutesBefore(),reminder.channel(),toLocalDateTime(startAt),
+                    remindValue,status,payload.timezone(),payload.allDay(),payload.startDate(),payload.endDate(),payload.revision());
+        } else if(same) {
+            jdbc.update("UPDATE reminder_dispatch SET user_id=?,title=?,start_at=?,timezone=?,all_day=?,start_date=?,end_date=?,"
+                            + "schedule_revision=? WHERE schedule_id=? AND minutes_before=? AND channel=?",
+                    userId,payload.title(),toLocalDateTime(startAt),payload.timezone(),payload.allDay(),payload.startDate(),
+                    payload.endDate(),payload.revision(),scheduleId,reminder.minutesBefore(),reminder.channel());
+        } else {
+            jdbc.update("UPDATE reminder_dispatch SET id=?,user_id=?,title=?,start_at=?,remind_at=?,status=?,timezone=?,all_day=?,"
+                            + "start_date=?,end_date=?,schedule_revision=?,attempt_count=0,last_error=NULL,sent_at=NULL,next_attempt_at=NULL "
+                            + "WHERE schedule_id=? AND minutes_before=? AND channel=?",
+                    id,userId,payload.title(),toLocalDateTime(startAt),remindValue,status,payload.timezone(),payload.allDay(),
+                    payload.startDate(),payload.endDate(),payload.revision(),scheduleId,reminder.minutesBefore(),reminder.channel());
         }
+        if("skipped".equals(status) && (previous.isEmpty() || !"skipped".equals(previous.get(0).status())))
+            incrementStat(occurredAt,"reminders_skipped",1);
+    }
 
-        // 항상 적용 (occurred_at 무관) — hard delete 는 terminal.
-        int skipped =
-                jdbcTemplate.update(
-                        "UPDATE reminder_dispatch SET status = 'skipped' "
-                                + "WHERE schedule_id = ? AND status = 'pending'",
-                        scheduleId);
-        if (skipped > 0) {
-            incrementStat(occurredAt, "reminders_skipped", skipped);
+    private void validateReminder(ReminderPayload reminder,List<ReminderPayload> all) {
+        if(reminder.minutesBefore()<0 || reminder.minutesBefore()>10080 || !List.of("push","email").contains(reminder.channel())
+                || all.stream().filter(r->r.minutesBefore()==reminder.minutesBefore() && reminder.channel().equals(r.channel())).count()>1)
+            throw new IllegalArgumentException("invalid reminder configuration");
+    }
+
+    private Instant reminderStartAt(ScheduleEventPayload payload) {
+        ZoneId zone;
+        try { zone=ZoneId.of(payload.timezone()); } catch(RuntimeException ex) { throw new IllegalArgumentException("invalid timezone",ex); }
+        if(payload.allDay()) {
+            if(payload.startDate()==null || payload.endDate()==null || !payload.endDate().isAfter(payload.startDate()))
+                throw new IllegalArgumentException("all-day dates are required");
+            return payload.startDate().atTime(9,0).atZone(zone).toInstant();
         }
+        if(payload.startAt()==null) throw new IllegalArgumentException("start_at is required");
+        return payload.startAt();
     }
 
-    private void upsertReminder(
-            byte[] scheduleId, byte[] userId, String title, Instant startAt, ReminderPayload reminder,
-            Instant occurredAt) {
-        Instant remindAt = startAt.minus(reminder.minutesBefore(), ChronoUnit.MINUTES);
-        LocalDateTime remindAtValue = toLocalDateTime(remindAt);
-        List<String> previous = jdbcTemplate.query(
-                "SELECT status FROM reminder_dispatch WHERE schedule_id = ? "
-                        + "AND minutes_before = ? AND channel = ? FOR UPDATE",
-                (rs, rowNum) -> rs.getString("status"),
-                scheduleId, reminder.minutesBefore(), reminder.channel());
-        jdbcTemplate.update(
-                REMINDER_UPSERT_SQL,
-                UuidBytes.toBytes(Uuid7Generator.generate()),
-                scheduleId,
-                userId,
-                title,
-                reminder.minutesBefore(),
-                reminder.channel(),
-                toLocalDateTime(startAt),
-                remindAtValue,
-                remindAtValue);
-        String current = jdbcTemplate.queryForObject(
-                "SELECT status FROM reminder_dispatch WHERE schedule_id = ? "
-                        + "AND minutes_before = ? AND channel = ?",
-                String.class, scheduleId, reminder.minutesBefore(), reminder.channel());
-        if ("skipped".equals(current) && (previous.isEmpty() || !"skipped".equals(previous.get(0)))) {
-            incrementStat(occurredAt, "reminders_skipped", 1);
-        }
+    private boolean isDeletedAccount(byte[] userId) {
+        jdbc.update("INSERT IGNORE INTO account_lifecycle_guard(user_hash,is_deleted) VALUES(UNHEX(SHA2(?,256)),0)",userId);
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_deleted FROM account_lifecycle_guard "
+                + "WHERE user_hash=UNHEX(SHA2(?,256)) FOR UPDATE",Boolean.class,userId));
     }
 
-    private EventState selectStateForUpdate(byte[] scheduleId) {
-        List<EventState> rows =
-                jdbcTemplate.query(
-                        "SELECT last_event_at, last_revision, is_deleted FROM schedule_event_state "
-                                + "WHERE schedule_id = ? FOR UPDATE",
-                        (rs, rowNum) ->
-                                new EventState(
-                                        rs.getTimestamp("last_event_at").toInstant(),
-                                        rs.getObject("last_revision", Long.class),
-                                        rs.getBoolean("is_deleted")),
-                        scheduleId);
-        return rows.isEmpty() ? null : rows.get(0);
+    private EventState selectStateForUpdate(byte[] id) {
+        List<EventState> rows=jdbc.query("SELECT last_event_at,last_revision,is_deleted FROM schedule_event_state "
+                        + "WHERE schedule_id=? FOR UPDATE",(rs,n)->new EventState(rs.getTimestamp("last_event_at").toInstant(),
+                        rs.getObject("last_revision",Long.class),rs.getBoolean("is_deleted")),id);
+        return rows.isEmpty()?null:rows.get(0);
     }
-
-    private void incrementCreatedStats(Instant occurredAt, String source) {
-        int aiCount = "ai".equals(source) ? 1 : 0;
-        int manualCount = "ai".equals(source) ? 0 : 1;
-        jdbcTemplate.update(
-                "INSERT INTO daily_schedule_stats "
-                        + "(stat_date, schedules_created, schedules_created_ai, schedules_created_manual) "
-                        + "VALUES (?, 1, ?, ?) AS new "
-                        + "ON DUPLICATE KEY UPDATE "
-                        + "schedules_created = daily_schedule_stats.schedules_created + 1, "
-                        + "schedules_created_ai = "
-                        + "daily_schedule_stats.schedules_created_ai + new.schedules_created_ai, "
-                        + "schedules_created_manual = "
-                        + "daily_schedule_stats.schedules_created_manual + new.schedules_created_manual",
-                toUtcDate(occurredAt),
-                aiCount,
-                manualCount);
+    private void incrementCreatedStats(Instant at,String source) {
+        int ai="ai".equals(source)?1:0,manual=ai==1?0:1;
+        jdbc.update("INSERT INTO daily_schedule_stats(stat_date,schedules_created,schedules_created_ai,schedules_created_manual) "
+                        + "VALUES(?,1,?,?) AS new ON DUPLICATE KEY UPDATE schedules_created=schedules_created+1, "
+                        + "schedules_created_ai=schedules_created_ai+new.schedules_created_ai, "
+                        + "schedules_created_manual=schedules_created_manual+new.schedules_created_manual",
+                toUtcDate(at),ai,manual);
     }
-
-    private boolean accountCreation(byte[] scheduleId) {
-        return jdbcTemplate.update(
-                        "UPDATE schedule_event_state SET creation_accounted = 1 "
-                                + "WHERE schedule_id = ? AND creation_accounted = 0",
-                        scheduleId)
-                == 1;
+    private void incrementStat(Instant at,String col,int amount) {
+        jdbc.update("INSERT INTO daily_schedule_stats(stat_date,"+col+") VALUES(?,?) AS new ON DUPLICATE KEY UPDATE "
+                + col+"=daily_schedule_stats."+col+"+new."+col,toUtcDate(at),amount);
     }
-
-    private void incrementStat(Instant occurredAt, String column, int amount) {
-        String sql =
-                "INSERT INTO daily_schedule_stats (stat_date, "
-                        + column
-                        + ") VALUES (?, ?) AS new "
-                        + "ON DUPLICATE KEY UPDATE "
-                        + column
-                        + " = daily_schedule_stats."
-                        + column
-                        + " + new."
-                        + column;
-        jdbcTemplate.update(sql, toUtcDate(occurredAt), amount);
+    private boolean isStale(EventState state,Long revision,Instant occurredAt) {
+        if(revision!=null && state.revision()!=null) return revision<=state.revision();
+        return state.revision()!=null || !occurredAt.isAfter(state.lastEventAt());
     }
-
-    private static LocalDateTime toLocalDateTime(Instant instant) {
-        return LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
-    }
-
-    private static LocalDate toUtcDate(Instant instant) {
-        return instant.atZone(ZoneOffset.UTC).toLocalDate();
-    }
-
-    private boolean isStale(EventState existing, Long revision, Instant occurredAt) {
-        if (revision != null && existing.lastRevision() != null) {
-            return revision <= existing.lastRevision();
-        }
-        return existing.lastRevision() != null || !occurredAt.isAfter(existing.lastEventAt());
-    }
-
-    private record EventState(Instant lastEventAt, Long lastRevision, boolean deleted) {}
+    private static LocalDateTime toLocalDateTime(Instant value) { return LocalDateTime.ofInstant(value,ZoneOffset.UTC); }
+    private static LocalDate toUtcDate(Instant value) { return value.atZone(ZoneOffset.UTC).toLocalDate(); }
+    private record EventState(Instant lastEventAt,Long revision,boolean deleted) {}
+    private record Snapshot(byte[] id,String status,Instant remindAt,Long revision) {}
+    private record ReminderKey(int minutesBefore,String channel) {}
 }

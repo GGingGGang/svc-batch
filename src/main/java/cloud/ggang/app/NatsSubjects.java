@@ -7,10 +7,18 @@ public final class NatsSubjects {
     public static final String STREAM_SCHEDULES = "APP_SCHEDULES";
     public static final String STREAM_SCHEDULES_DLQ = "APP_SCHEDULES_DLQ";
     public static final String CONSUMER_NAME = "batch-reminders";
+    public static final String STREAM_REMINDERS = "APP_REMINDERS";
+    public static final String CONSUMER_REMINDER_RESULTS = "batch-reminder-results";
+    public static final String STREAM_ACCOUNT_LIFECYCLE = "ACCOUNT_LIFECYCLE";
+    public static final String CONSUMER_ACCOUNT_DELETIONS = "batch-account-deletions";
 
     public static final String SCHEDULE_CREATED = "app.schedules.created.v1";
     public static final String SCHEDULE_UPDATED = "app.schedules.updated.v1";
     public static final String SCHEDULE_DELETED = "app.schedules.deleted.v1";
+    public static final String REMINDER_DUE = "app.reminders.due.v1";
+    public static final String REMINDER_RESULT = "app.reminders.result.v1";
+    public static final String ACCOUNT_DELETION_REQUESTED = "app.account.deletion_requested.v1";
+    public static final String ACCOUNT_DELETION_RESULT = "app.account.deletion_result.v1";
 
     private static final String DLQ_SUBJECT_PREFIX = "app.schedules.dlq.";
 

@@ -25,3 +25,12 @@ jobs:
       # 유닛 + 통합 풀 스위트 — test-contract.md §4. Docker 는 ubuntu-latest 러너 기본 제공.
       - run: gradle test
       - run: gradle integrationTest
+      - name: Upload Gradle reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: svc-batch-gradle-reports
+          path: |
+            build/reports/tests/**
+            build/test-results/**
+          if-no-files-found: ignore
